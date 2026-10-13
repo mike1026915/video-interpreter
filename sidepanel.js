@@ -2,7 +2,15 @@
 const TARGET = 'zh-Hant';
 const SR = 16000;               // Whisper 需要 16kHz
 const FRAME = SR / 10;          // 100ms 一個音框，用來判斷有沒有人說話
-const SILENCE_RMS = 0.008;      // 低於這個音量視為靜音
+const SILENCE_RMS = 0.008;      // 底噪還沒估出來前（開頭約 1 秒）使用的預設門檻；之後改用自適應門檻
+// 自適應靜音門檻：用最近一段時間裡「最安靜的那一小部分音框」估計底噪，門檻 = 底噪 × 倍數。
+// 收音小聲、底噪大、背景音樂的音檔，固定門檻會把人聲當靜音（漏句）或把底噪當人聲（切不出停頓）。
+const NOISE_WINDOW_FRAMES = 100; // 往回看 10 秒
+const NOISE_PERCENTILE = 0.1;    // 取最安靜的 10% 當底噪（說話中的換氣、字間空隙）
+const NOISE_MULT = 2;
+const NOISE_WARMUP_FRAMES = 10;  // 累積這麼多音框（1 秒）後才開始用估計值
+const MIN_THRESHOLD = 0.003;
+const MAX_THRESHOLD = 0.03;      // 上限：收音很小聲時，不要讓門檻高到把人聲也蓋掉
 const MIN_SEG_S = 3;            // 一段至少 3 秒才切（太短會把一句話拆開，翻譯失去上下文）
 const MAX_SEG_S = 8;            // 累積到 8 秒還沒遇到停頓，就在最安靜的地方切（快語速也不會一段塞太多字）
 const CUT_SEARCH_FROM_S = 4;    // 到上限時，只在這個時間點之後找最安靜的音框來切
@@ -12,7 +20,8 @@ const MAX_GAIN = 8;             // 最多放大幾倍，避免把底噪放大成
 const END_SILENCE_S = 0.6;      // 講完停頓 0.6 秒就切段
 const LONG_SEG_S = 6;           // 累積超過 6 秒後，改用較短的停頓就切，避免硬切在字中間
 const LONG_END_SILENCE_S = 0.35;
-const MIN_VOICED_S = 0.5;       // 有聲音的部分不到 0.5 秒就丟掉（避免 Whisper 對靜音亂講）
+const MIN_VOICED_S = 0.3;       // 有聲音的部分不到 0.3 秒就丟掉（避免 Whisper 對靜音亂講；太高會吃掉「はい」這類短回應）
+const MIN_NOTE_VOICED_S = 0.15; // 被丟掉的段落若有聲音部分超過這個長度，就在畫面上留一行提示
 
 const WHISPER_LANG = {
   en: 'english', ja: 'japanese', ko: 'korean', fr: 'french',
@@ -28,7 +37,8 @@ const HALLUCINATIONS = [
 // ===== DOM =====
 const $ = (id) => document.getElementById(id);
 const els = {
-  srcLang: $('srcLang'), model: $('model'), mode: $('mode'), start: $('startBtn'), stop: $('stopBtn'),
+  srcLang: $('srcLang'), model: $('model'), customModel: $('customModel'), customRow: $('customRow'),
+  mode: $('mode'), start: $('startBtn'), stop: $('stopBtn'),
   exp: $('exportBtn'), clear: $('clearBtn'), status: $('status'), progress: $('progress'),
   dl: $('dlTranslatorBtn'), list: $('list'),
 };
@@ -39,13 +49,31 @@ function setStatus(text, isErr = false) {
 }
 
 // ===== 設定記憶 =====
-chrome.storage.local.get(['srcLang', 'model', 'mode']).then((s) => {
+function showCustomRow() { els.customRow.hidden = els.model.value !== 'custom'; }
+
+chrome.storage.local.get(['srcLang', 'model', 'customModel', 'mode']).then((s) => {
   if (s.srcLang) els.srcLang.value = s.srcLang;
   if (s.model) els.model.value = s.model;
+  if (s.customModel) els.customModel.value = s.customModel;
   if (s.mode) els.mode.value = s.mode;
+  showCustomRow();
 });
 els.srcLang.onchange = () => chrome.storage.local.set({ srcLang: els.srcLang.value });
-els.model.onchange = () => chrome.storage.local.set({ model: els.model.value });
+els.model.onchange = () => {
+  chrome.storage.local.set({ model: els.model.value });
+  showCustomRow();
+};
+els.customModel.onchange = () => chrome.storage.local.set({ customModel: els.customModel.value.trim() });
+
+// 回傳要載入的模型 ID；自訂模型格式不對時丟出錯誤
+function getModel() {
+  if (els.model.value !== 'custom') return els.model.value;
+  const id = els.customModel.value.trim().replace(/^https?:\/\/huggingface\.co\//, '').replace(/\/+$/, '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(id)) {
+    throw new Error('自訂模型 ID 格式應為「作者/模型名」，例如 willopcbeta/whisper-ja-760M-ONNX');
+  }
+  return id;
+}
 els.mode.onchange = () => {
   chrome.storage.local.set({ mode: els.mode.value });
   // 切到即時：把已經在等句尾的原文馬上翻掉
@@ -67,6 +95,8 @@ worker.onmessage = (e) => {
     els.progress.hidden = false;
     els.progress.firstElementChild.style.width = `${(l / t) * 100}%`;
     setStatus(`下載辨識模型中… ${(l / 1e6).toFixed(0)} / ${(t / 1e6).toFixed(0)} MB（只有第一次需要）`);
+  } else if (m.type === 'status') {
+    setStatus(m.text);
   } else if (m.type === 'loaded') {
     els.progress.hidden = true;
     workerReady?.resolve(m);
@@ -223,6 +253,19 @@ function addEntry(t0, text, timing = {}) {
   return entry;
 }
 
+// 被略過的段落（辨識為空、被當成幻覺濾掉、有聲音的部分太短、辨識出錯）：
+// 不進逐字稿，只在畫面上留一行淡色提示，才知道「漏掉」是漏在哪一關
+function addSkipNote(t0, reason) {
+  els.list.querySelector('.empty')?.remove();
+  const div = document.createElement('div');
+  div.className = 'skip';
+  div.textContent = `${fmtTime(t0)} · ${reason}`;
+  const nearBottom = els.list.scrollHeight - els.list.scrollTop - els.list.clientHeight < 80;
+  els.list.appendChild(div);
+  if (nearBottom) els.list.scrollTop = els.list.scrollHeight;
+  console.log('[skip]', fmtTime(t0), reason);
+}
+
 function fmtTime(s) {
   const m = Math.floor(s / 60), ss = Math.floor(s % 60);
   return `${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
@@ -319,7 +362,14 @@ function enqueueSegment(audio, t0, srcSetting) {
       const tStart = performance.now();
       const text = await transcribe(audio, WHISPER_LANG[srcSetting] || null);
       const asrMs = Math.round(performance.now() - tStart);
-      if (!text || HALLUCINATIONS.some((r) => r.test(text))) return;
+      if (!text) {
+        addSkipNote(t0, `略過：辨識結果為空（音訊 ${audioS.toFixed(1)}s，可能太小聲或只有雜音）`);
+        return;
+      }
+      if (HALLUCINATIONS.some((r) => r.test(text))) {
+        addSkipNote(t0, `略過：被當成幻覺濾掉「${text}」`);
+        return;
+      }
       const entry = addEntry(t0, text, { audioS, waitMs: Math.round(tStart - tEnq), asrMs });
       entry.showTiming();
 
@@ -327,6 +377,7 @@ function enqueueSegment(audio, t0, srcSetting) {
       queueForTranslation(entry, srcSetting);
     } catch (err) {
       setStatus(`辨識錯誤：${err.message}`, true);
+      addSkipNote(t0, `略過：辨識錯誤 ${err.message}`);
     } finally {
       backlog--;
       if (running && backlog <= 3) setStatus('口譯中…（側欄關閉就會停止）');
@@ -340,7 +391,8 @@ let stream = null, ctx = null, workletNode = null;
 
 async function start() {
   const srcSetting = els.srcLang.value;
-  const model = els.model.value;
+  let model;
+  try { model = getModel(); } catch (err) { setStatus(err.message, true); return; }
   els.start.disabled = true;
   setStatus('準備中…');
 
@@ -380,7 +432,11 @@ async function start() {
     mute.gain.value = 0;
     source.connect(workletNode).connect(mute).connect(ctx.destination);
 
-    segmenter = makeSegmenter(ctx.sampleRate, (audio, t0) => enqueueSegment(audio, t0, srcSetting));
+    segmenter = makeSegmenter(
+      ctx.sampleRate,
+      (audio, t0) => enqueueSegment(audio, t0, srcSetting),
+      (t0, voicedS) => addSkipNote(t0, `略過：有聲音的部分只有 ${voicedS.toFixed(1)}s，太短`),
+    );
     workletNode.port.onmessage = (e) => segmenter?.push(e.data);
 
     stream.getAudioTracks()[0].addEventListener('ended', () => stop());
@@ -413,7 +469,7 @@ function stop() {
 }
 
 // 把原始取樣率降到 16kHz，並依停頓切段
-function makeSegmenter(inRate, onSegment) {
+function makeSegmenter(inRate, onSegment, onDrop) {
   const ratio = inRate / SR;
   let frac = 0;
   let frame = new Float32Array(FRAME), fLen = 0;
@@ -424,7 +480,20 @@ function makeSegmenter(inRate, onSegment) {
   let segStart = 0;
   let quiet = 0;                  // 距離最後一個有聲音框已經過了幾個音框（不論有沒有在錄段落）
 
-  const isLoud = (r) => r > SILENCE_RMS;
+  let threshold = SILENCE_RMS;    // 目前的有聲音門檻（隨底噪調整）
+  const recent = [];              // 最近幾個音框的音量，用來估底噪
+  let frameCount = 0;
+  const isLoud = (r) => r > threshold;
+
+  function updateThreshold(r) {
+    recent.push(r);
+    if (recent.length > NOISE_WINDOW_FRAMES) recent.shift();
+    if (recent.length < NOISE_WARMUP_FRAMES) return;
+    const sorted = [...recent].sort((a, b) => a - b);
+    const noise = sorted[Math.floor(NOISE_PERCENTILE * (sorted.length - 1))];
+    threshold = Math.min(MAX_THRESHOLD, Math.max(MIN_THRESHOLD, noise * NOISE_MULT));
+    if (++frameCount % 200 === 0) console.log(`[vad] 底噪 ${noise.toFixed(4)} → 門檻 ${threshold.toFixed(4)}`);
+  }
 
   // 把說話部分的音量拉到 TARGET_RMS 左右（取 90 百分位，不被突波影響）；只放大
   function gainFor() {
@@ -441,6 +510,8 @@ function makeSegmenter(inRate, onSegment) {
       frames.forEach((f, i) => audio.set(f, i * FRAME));
       if (g > 1) for (let i = 0; i < audio.length; i++) audio[i] = Math.max(-1, Math.min(1, audio[i] * g));
       onSegment(audio, segStart);
+    } else if (frames.length && voiced * 0.1 >= MIN_NOTE_VOICED_S) {
+      onDrop?.(segStart, voiced * 0.1);
     }
     frames = []; rmsArr = []; voiced = 0; trailingSilent = 0; pre = [];
   }
@@ -471,6 +542,7 @@ function makeSegmenter(inRate, onSegment) {
     let sum = 0;
     for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
     const r = Math.sqrt(sum / f.length);
+    updateThreshold(r);
     const loud = isLoud(r);
     quiet = loud ? 0 : quiet + 1;
 
@@ -496,7 +568,7 @@ function makeSegmenter(inRate, onSegment) {
 
   return {
     // open：正有一段在錄（說話者還在講）；quietS：最後一次有聲音到現在的秒數
-    status() { return { open: frames.length > 0, quietS: quiet / 10 }; },
+    status() { return { open: frames.length > 0, quietS: quiet / 10, threshold }; },
     push(chunk) {
       // 簡單平均降取樣
       let pos = frac;
