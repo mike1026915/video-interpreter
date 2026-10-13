@@ -1,10 +1,16 @@
-// 在 Web Worker 裡跑 Whisper，避免卡住側邊欄畫面
+// 在 Web Worker 裡跑 Whisper / Cohere Transcribe（transformers.js），避免卡住側邊欄畫面
 import { pipeline, env } from './lib/transformers.min.js';
+import { ORT_WASM_PATHS, isCohere, gpuInfo } from './shared.js';
 
 env.allowLocalModels = false;
 env.useBrowserCache = true; // 模型下載一次後會快取
-env.backends.onnx.wasm.wasmPaths = new URL('./lib/', import.meta.url).href;
+env.backends.onnx.wasm.wasmPaths = { ...ORT_WASM_PATHS }; // 不從 CDN 載入，見 shared.js
 env.backends.onnx.wasm.numThreads = 1;
+
+const WHISPER_LANG = {
+  en: 'english', ja: 'japanese', ko: 'korean', fr: 'french',
+  de: 'german', es: 'spanish', zh: 'chinese',
+};
 
 // 解碼參數：語速快或音質差時，beam search 比貪婪解碼不容易選錯字（較慢）
 const NUM_BEAMS = 4;
@@ -20,14 +26,6 @@ let loadedInfo = null;
 const errMsg = (err) => String((err && err.message) || err);
 const status = (text) => self.postMessage({ type: 'status', text });
 
-async function hasWebGPU() {
-  try {
-    return !!(self.navigator.gpu && (await self.navigator.gpu.requestAdapter()));
-  } catch {
-    return false;
-  }
-}
-
 // WebGPU 執行階段的錯誤（某個運算不支援）。這種錯誤之後同一個 worker 可能已經壞掉。
 const isGpuRuntimeErr = (err) => /\[WebGPU\]|Kernel/i.test(errMsg(err));
 // 找不到某組量化的檔案。只有這種錯誤才值得換下一組量化：其他錯誤換了也一樣會壞，
@@ -36,17 +34,26 @@ const isMissingFileErr = (err) => /could not locate|not found|404|no such file/i
 
 // 依序嘗試的量化設定。內建模型的檔案已知，只用一組，絕不嘗試其他量化（避免悄悄下載別的版本）；
 // 自訂模型的檔案命名不一定相同，找不到檔案時才換下一組。刻意不放純 fp32，避免下載好幾 GB。
-function dtypeCandidates(model, gpu) {
+// f16：顯示卡支援 shader-f16 才用 fp16 的檔案，否則改用 q4（大模型）或 fp32（小模型）的 encoder。
+function dtypeCandidates(model, gpu, f16) {
+  if (isCohere(model)) return gpu ? [f16 ? 'q4f16' : 'q4'] : [];
   const builtin = model.startsWith('onnx-community/whisper-');
-  if (!gpu) return builtin ? ['q8'] : ['q8', 'q4'];
-  if (builtin) return [{ encoder_model: /large|turbo/i.test(model) ? 'fp16' : 'fp32', decoder_model_merged: 'q4' }];
   const big = /large|turbo|medium|760M|1\.5B/i.test(model);
-  const list = [
+  if (!gpu) return builtin ? ['q8'] : ['q8', 'q4'];
+  if (builtin) {
+    if (!big) return [{ encoder_model: 'fp32', decoder_model_merged: 'q4' }];
+    return [{ encoder_model: f16 ? 'fp16' : 'q4', decoder_model_merged: 'q4' }];
+  }
+  const list = f16 ? [
     { encoder_model: big ? 'fp16' : 'fp32', decoder_model_merged: 'q4' },
     { encoder_model: 'fp16', decoder_model_merged: 'q4' },
     { encoder_model: 'fp16', decoder_model_merged: 'fp16' },
     'q8',
     'fp16',
+  ] : [
+    { encoder_model: big ? 'q4' : 'fp32', decoder_model_merged: 'q4' },
+    'q8',
+    'q4',
   ];
   const seen = new Set();
   return list.filter((d) => !seen.has(JSON.stringify(d)) && seen.add(JSON.stringify(d)));
@@ -55,8 +62,17 @@ function dtypeCandidates(model, gpu) {
 // 載入成功不代表能跑：例如 WebGPU 可能在推論時才發現某個運算不支援
 // （"[WebGPU] Kernel ... Mask not supported"）。所以用 1 秒靜音實際跑一次，順便預熱。
 // 只有 WebGPU 執行階段錯誤算失敗；其他預熱錯誤跟以前一樣只警告（實際辨識通常仍然正常）。
-async function validate() {
+async function validate(model) {
   const silence = new Float32Array(16000);
+  if (isCohere(model)) {
+    try {
+      await asr(silence, { language: 'en', max_new_tokens: 4 });
+    } catch (err) {
+      if (isGpuRuntimeErr(err)) throw err;
+      console.warn('[asr] 預熱失敗（不影響使用）', err);
+    }
+    return;
+  }
   try {
     await asr(silence, { language: 'english', task: 'transcribe' });
     return;
@@ -77,10 +93,14 @@ async function load(model, forceWasm = false, forcedReason = '') {
   if (asr && loadedModel === model) return loadedInfo;
   if (asr) { try { await asr.dispose(); } catch {} asr = null; loadedModel = null; }
 
-  const gpu = !forceWasm && (await hasWebGPU());
+  const info = forceWasm ? { ok: false, f16: false } : await gpuInfo();
+  const gpu = info.ok;
+  if (isCohere(model) && !gpu) {
+    throw new Error('Cohere Transcribe 需要 WebGPU（模型 2B，用 CPU 跟不上影片），請改用 Whisper 模型');
+  }
   const attempts = [
-    ...(gpu ? dtypeCandidates(model, true).map((dtype) => ({ device: 'webgpu', dtype })) : []),
-    ...dtypeCandidates(model, false).map((dtype) => ({ device: 'wasm', dtype })),
+    ...(gpu ? dtypeCandidates(model, true, info.f16).map((dtype) => ({ device: 'webgpu', dtype })) : []),
+    ...dtypeCandidates(model, false, false).map((dtype) => ({ device: 'wasm', dtype })),
   ];
   const progress_callback = (p) => {
     if (p.status === 'progress' && p.total) {
@@ -103,7 +123,7 @@ async function load(model, forceWasm = false, forcedReason = '') {
       asr = await pipeline('automatic-speech-recognition', model, { device, dtype, progress_callback });
       status(`驗證模型能否執行（${label}）…`);
       const t0 = performance.now();
-      await validate();
+      await validate(model);
       console.log(`[asr] 模型 ${model} 使用 ${label} 執行緒 ${env.backends.onnx.wasm.numThreads} 驗證＋預熱 ${Math.round(performance.now() - t0)}ms`);
       loadedModel = model;
       loadedInfo = {
@@ -120,7 +140,7 @@ async function load(model, forceWasm = false, forcedReason = '') {
       // WebGPU 執行階段的錯誤（某個運算不支援）跟量化無關，換量化也一樣會壞。
       // 這種錯誤之後，同一個 worker 裡的 ONNX Runtime 可能已經壞掉，連 CPU session 也會回報同樣的錯誤，
       // 所以不在這裡改用 CPU，而是請側欄關掉這個 worker、開一個全新的只用 CPU。
-      if (device === 'webgpu' && isGpuRuntimeErr(err)) {
+      if (device === 'webgpu' && isGpuRuntimeErr(err) && !isCohere(model)) {
         throw Object.assign(new Error(errMsg(err)), { restartForCpu: true });
       }
       // 其他錯誤不再換下一組：換了也一樣會壞，還會一套接一套地下載模型檔
@@ -131,8 +151,18 @@ async function load(model, forceWasm = false, forcedReason = '') {
   throw new Error(`模型 ${model} 無法載入或執行：${errMsg(lastErr)}`);
 }
 
-async function decode(audio, language) {
+// lang：ISO 代碼（ja、en…），自動偵測時為 null
+async function decode(audio, lang) {
   if (!asr) throw new Error('辨識模型尚未載入成功');
+  if (isCohere(loadedModel)) {
+    if (!lang) throw new Error('Cohere Transcribe 不能自動偵測語言，請在「原文語言」選擇影片的語言');
+    // 貪婪解碼；448 個 token 足夠 15 秒的段落，也限制模型重複迴圈時的耗時
+    return asr(audio, { language: lang, max_new_tokens: 448 });
+  }
+  return decodeWhisper(audio, WHISPER_LANG[lang] || null);
+}
+
+async function decodeWhisper(audio, language) {
   const opts = { chunk_length_s: 30, max_new_tokens: MAX_NEW_TOKENS };
   if (langOk) { opts.language = language || null; opts.task = 'transcribe'; }
 
@@ -140,7 +170,7 @@ async function decode(audio, language) {
     try {
       return await asr(audio, { ...opts, num_beams: NUM_BEAMS, no_repeat_ngram_size: NO_REPEAT_NGRAM });
     } catch (err) {
-      if (langOk && /language|task/i.test(errMsg(err))) { langOk = false; return decode(audio, language); }
+      if (langOk && /language|task/i.test(errMsg(err))) { langOk = false; return decodeWhisper(audio, language); }
       // beam search 在某些環境可能不支援，退回貪婪解碼，並且之後不再嘗試
       console.warn('[asr] beam search 失敗，改用貪婪解碼', err);
       beamsOk = false;
@@ -152,7 +182,7 @@ async function decode(audio, language) {
     if (langOk && /language|task/i.test(errMsg(err))) {
       console.warn('[asr] 這個模型不接受 language / task 參數，之後不再傳', err);
       langOk = false;
-      return decode(audio, language);
+      return decodeWhisper(audio, language);
     }
     throw err;
   }
@@ -174,7 +204,7 @@ self.onmessage = async (e) => {
       }
       self.postMessage({ type: 'loaded', ...info });
     } else if (m.type === 'transcribe') {
-      const out = await decode(m.audio, m.language);
+      const out = await decode(m.audio, m.lang || null);
       self.postMessage({ type: 'result', id: m.id, text: (out.text || '').trim() });
     }
   } catch (err) {

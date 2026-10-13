@@ -1,0 +1,70 @@
+{
+ "layout_version": 2,
+ "mel": {
+  "n_mels": 8,
+  "filters_file": "mel_filters.json"
+ },
+ "prompt": {
+  "prefix_ids": [
+   1,
+   2,
+   3
+  ],
+  "suffix_ids": [
+   4,
+   5
+  ],
+  "audio_pad_id": 20,
+  "asr_text_id": 21,
+  "eos_ids": [
+   30,
+   31
+  ],
+  "max_new_tokens": 16
+ },
+ "language_prefix_ids": {
+  "ja": [
+   6,
+   7,
+   21
+  ]
+ },
+ "language_names": {
+  "ja": "Japanese",
+  "en": "English"
+ },
+ "embedding": {
+  "file": "embed_tokens.int8.bin",
+  "dtype": "int8",
+  "shape": [
+   32,
+   32
+  ],
+  "scales_file": "embed_scales.f32.bin"
+ },
+ "decoder": {
+  "num_layers": 2,
+  "num_key_value_heads": 1,
+  "head_dim": 4,
+  "hidden_size": 32,
+  "vocab_size": 32
+ },
+ "variants": {
+  "q4": {
+   "encoder": "encoder.onnx",
+   "decoder_init": "decoder_init.int4.onnx",
+   "decoder_step": "decoder_step.int4.onnx",
+   "weights": null,
+   "required_features": []
+  },
+  "q4f16": {
+   "encoder": "encoder.onnx",
+   "decoder_init": "decoder_init.q4f16.onnx",
+   "decoder_step": "decoder_step.q4f16.onnx",
+   "weights": null,
+   "required_features": [
+    "shader-f16"
+   ]
+  }
+ }
+}

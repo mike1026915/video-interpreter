@@ -1,6 +1,6 @@
 # 影片口譯側欄（Chrome 擴充功能）
 
-擷取目前分頁的影片聲音 → 本機 Whisper 語音辨識 → Chrome 內建翻譯轉繁體中文 → 顯示在側邊欄。
+擷取目前分頁的影片聲音 → 本機語音辨識（Whisper / Qwen3-ASR / Cohere Transcribe）→ 翻成繁體中文（Chrome 內建翻譯或本機 HY-MT1.5）→ 顯示在側邊欄。
 全部在你的電腦上跑，免費、不需要任何 API 金鑰，聲音不會上傳。
 
 ## 安裝
@@ -14,19 +14,38 @@
 
 ## 使用
 1. 打開有影片的分頁，點工具列上的擴充功能圖示 → 右側出現側邊欄。
-2. 選原文語言和辨識模型（原文語言預設為日文），按「開始口譯」。
+2. 選原文語言、辨識模型、翻譯引擎（原文語言預設為日文），按「開始口譯」。
 3. 播放影片。大約每 3～8 秒會出現一段原文，隨後補上中文。
 4. 「匯出」可以下載逐字稿 .txt。
 
-第一次使用會下載模型：Whisper small 約 300MB，翻譯模型每個語言對一個，之後都有快取。
+第一次使用會下載模型（見下表），之後都有快取。
 
 ### 辨識模型怎麼選
-| 模型 | 適合 |
-|---|---|
-| base | 沒有 GPU，或速度跟不上時 |
-| small | 預設，一般建議 |
-| large-v3-turbo | 有 WebGPU 的顯卡時最準；下載量較大 |
-| 自訂 | 輸入任何 Hugging Face 上、有 ONNX 版本的 Whisper 模型 ID，見下 |
+| 模型 | 下載量 | 適合 |
+|---|---|---|
+| Whisper base | 約 150MB | 沒有 GPU，或速度跟不上時 |
+| Whisper small | 約 300MB | 沒有 GPU 時的預設 |
+| Whisper large-v3-turbo | 0.8～1.6GB | **有 WebGPU 時的預設**。日文比 small 準很多 |
+| Qwen3-ASR 1.7B | 2.0～2.7GB | 有 WebGPU、想要日文最準時。需要約 3.5～5GB 顯示記憶體 |
+| Cohere Transcribe | 1.5～2.1GB | 實驗性質。需要 WebGPU，不能自動偵測語言 |
+| 自訂 | — | Hugging Face 上的 ONNX 模型 ID，見下 |
+
+- 沒有選過模型時，有 WebGPU 會預設 large-v3-turbo，沒有就預設 small。選過之後會記住你的選擇。
+- 下載量有範圍，是因為依顯示卡選檔案：支援 `shader-f16` 的顯卡（Windows、macOS 大多支援）用 fp16 版，比較小也比較快；不支援的（例如 Linux 上的 NVIDIA）用 q4 版。
+- 日文準確度參考（CER，越低越好）：FLEURS 朗讀語音 turbo 6.6%、Qwen3-ASR 1.7B 5.4%；對話語音 turbo 0.184、Qwen3-ASR 1.7B 0.140。small 在 CommonVoice 日文約 15%，large-v3 約 8.5%。動畫、有背景音樂的影片請自己比較看看。
+
+### Qwen3-ASR 1.7B
+- 模型：[`jiangzhuo9357/Qwen3-ASR-1.7B-ONNX`](https://huggingface.co/jiangzhuo9357/Qwen3-ASR-1.7B-ONNX)（Apache-2.0，Sokuji 專案轉的瀏覽器版）。
+- transformers.js 不支援 Qwen3-ASR，所以由 `qwen3-asr-worker.js` 直接用 onnxruntime-web 執行：encoder + decoder_init + decoder_step，KV cache 留在 GPU。
+- 選了原文語言時，會把「language Japanese<asr_text>」直接放進 prompt（強制語言），避免量化模型偶爾跳過語言標記而輸出錯誤內容；「自動偵測」時由模型自己判斷，console 會印出 `[qwen3-asr] 偵測到語言`，翻譯也直接用這個結果，不再另外偵測。
+- 只能用 WebGPU（CPU 太慢跟不上影片），沒有 WebGPU 會顯示錯誤，請改用 Whisper。
+- 模型檔存在瀏覽器的 Cache Storage（`qwen3-asr-models`），第二次開始不會重新下載。
+- 自訂模型欄也可以填其他同格式（layout v2，有 `prompt_config.json`）的 Qwen3-ASR ONNX，模型 ID 含 `qwen3-asr` 就會用這個 worker。
+
+### Cohere Transcribe
+- 模型：[`onnx-community/cohere-transcribe-03-2026-ONNX`](https://huggingface.co/onnx-community/cohere-transcribe-03-2026-ONNX)，2B，透過 transformers.js 4.x 的語音辨識 pipeline 執行。
+- 沒有自動偵測語言，「原文語言」選「自動偵測」時無法開始。
+- 公開數據裡日文不見得比 turbo 好（FLEURS 約 8.3%），放著給你用自己的影片比較。
 
 ### 自訂模型
 選「自訂」後會出現輸入欄，填 `作者/模型名`（貼整個 huggingface.co 網址也可以），設定會被記住。
@@ -40,6 +59,13 @@
 - 換模型、上次載入失敗，或辨識時出過 WebGPU 錯誤之後，下次按「開始」都會換一個全新的 worker，不會沿用可能已經壞掉的那個（模型檔有快取，不會重新下載）。所以試過跑不動的自訂模型之後，換回內建模型可以直接用，不必關掉側欄。
 - 已知：`willopcbeta/whisper-ja-760M-ONNX` 在 WebGPU 上會出現上面那個 Attention mask 錯誤，只能用 CPU 跑；760M 的模型在 CPU 上很慢，多半跟不上影片，請看「排隊」秒數。
 - 第一次載入要下載模型，之後走瀏覽器快取。
+
+### 翻譯引擎
+- **Chrome 內建**（預設）：Chrome 的 Translator API，快，但一次只翻一句，看不到前文。
+- **HY-MT1.5 本機模型**：騰訊的翻譯專用模型 [`onnx-community/HY-MT1.5-1.8B-ONNX`](https://huggingface.co/onnx-community/HY-MT1.5-1.8B-ONNX)，官方支援繁體中文。翻譯時會把前 2 句原文當上下文一起送進去（`MT_CONTEXT_SENTENCES`），日文省略主詞時比較不容易翻錯。
+  - 需要 WebGPU，下載 1.2～1.4GB；跟辨識模型同時在 GPU 上，顯示記憶體要夠（搭配 Qwen3-ASR 1.7B 大約要 5GB 以上）。
+  - 載入失敗時自動改用 Chrome 內建翻譯，狀態列會註明。
+  - 提示詞用模型卡建議的中文模板；在 `mt-worker.js` 的 `buildPrompt`。
 
 ### 即時 / 精準
 側欄的「翻譯方式」可以隨時切換（設定會記住）：
@@ -92,7 +118,7 @@
 - 側邊欄關掉就會停止擷取，已顯示的逐字稿也會消失，需要的話先匯出。
 - 「自動偵測」語言時，翻譯模型下載需要點一下側欄裡出現的提示按鈕。
 - 背景音樂很大聲的影片，辨識品質會下降；有 DRM 的串流平台可能抓不到聲音。
-- 沒有 WebGPU 時會退回 CPU（wasm），明顯比較慢。manifest 設了跨來源隔離，讓 CPU 模式可以開多執行緒；如果模型下載或載入出現跨來源（COOP/COEP）錯誤，刪掉 `manifest.json` 裡 `cross_origin_embedder_policy` 與 `cross_origin_opener_policy` 兩行即可，程式會退回單執行緒。
+- 沒有 WebGPU 時 Whisper 會退回 CPU（wasm），明顯比較慢；Qwen3-ASR、Cohere Transcribe、HY-MT1.5 沒有 WebGPU 就不能用。manifest 設了跨來源隔離，讓 CPU 模式可以開多執行緒；如果模型下載或載入出現跨來源（COOP/COEP）錯誤，刪掉 `manifest.json` 裡 `cross_origin_embedder_policy` 與 `cross_origin_opener_policy` 兩行即可，程式會退回單執行緒。
 - Chrome 內建翻譯只能單句翻，詞義錯誤（例如人名、地名、多義詞）無法完全避免。
 
 ## 可調參數
@@ -102,3 +128,12 @@
 - 整句合併（在「句子合併」區塊）：`MAX_GROUP_CHARS`、`MAX_GROUP_SEGS`、`GROUP_QUIET_S`、`GROUP_MAX_WAIT_MS`。
 
 `asr-worker.js` 最上面：`NUM_BEAMS`、`MAX_NEW_TOKENS`、`NO_REPEAT_NGRAM`；另外 CPU 模式的執行緒數也在這支檔案。
+
+`qwen3-asr-worker.js`：`TOKENS_PER_SECOND`（每秒音訊最多生成幾個 token，限制模型重複迴圈的耗時）。
+
+`sidepanel.js`：`MT_CONTEXT_SENTENCES`（HY-MT1.5 帶幾句前文）。
+
+## 函式庫與測試
+- `lib/`：transformers.js 4.3.1（`transformers.min.js`）、onnxruntime-web 1.31.0-dev（`ort.webgpu.min.mjs`，給 Qwen3-ASR 用），以及兩者共用的 `ort-wasm-simd-threaded.asyncify.{mjs,wasm}`。transformers.js 4.x 預設會從 CDN 載入 wasm，MV3 不允許，所以每個 worker 都把 `wasmPaths` 指向本地 `lib/`（路徑統一寫在 `shared.js`）。`transformers.min.js` 有一處手動修改：`"Mistral3ForConditionalGeneration"` 拆成 `"Mistral3For"+"ConditionalGeneration"`，因為 GitHub 密鑰掃描會把原字串誤判成 API Key 擋下 push，升級時要再改一次。
+- `node --test tests/*.test.mjs`：測 Qwen3-ASR 的 log-mel、float16 轉換、prompt、BPE 解碼，以及用假模型（`tests/fixtures/mock-qwen3/`，介面跟真模型相同）跑完整的解碼迴圈。
+- 參考答案由 `tests/gen_fixtures.py`（numpy）產生；假模型由 `tests/make_mock_qwen3.py`（numpy + onnx）產生。
