@@ -12,7 +12,8 @@ const MAX_GAIN = 8;             // 最多放大幾倍，避免把底噪放大成
 const END_SILENCE_S = 0.6;      // 講完停頓 0.6 秒就切段
 const LONG_SEG_S = 6;           // 累積超過 6 秒後，改用較短的停頓就切，避免硬切在字中間
 const LONG_END_SILENCE_S = 0.35;
-const MIN_VOICED_S = 0.5;       // 有聲音的部分不到 0.5 秒就丟掉（避免 Whisper 對靜音亂講）
+const MIN_VOICED_S = 0.3;       // 有聲音的部分不到 0.3 秒就丟掉（避免 Whisper 對靜音亂講；太高會吃掉「はい」這類短回應）
+const MIN_NOTE_VOICED_S = 0.15; // 被丟掉的段落若有聲音部分超過這個長度，就在畫面上留一行提示
 
 const WHISPER_LANG = {
   en: 'english', ja: 'japanese', ko: 'korean', fr: 'french',
@@ -223,6 +224,19 @@ function addEntry(t0, text, timing = {}) {
   return entry;
 }
 
+// 被略過的段落（辨識為空、被當成幻覺濾掉、有聲音的部分太短、辨識出錯）：
+// 不進逐字稿，只在畫面上留一行淡色提示，才知道「漏掉」是漏在哪一關
+function addSkipNote(t0, reason) {
+  els.list.querySelector('.empty')?.remove();
+  const div = document.createElement('div');
+  div.className = 'skip';
+  div.textContent = `${fmtTime(t0)} · ${reason}`;
+  const nearBottom = els.list.scrollHeight - els.list.scrollTop - els.list.clientHeight < 80;
+  els.list.appendChild(div);
+  if (nearBottom) els.list.scrollTop = els.list.scrollHeight;
+  console.log('[skip]', fmtTime(t0), reason);
+}
+
 function fmtTime(s) {
   const m = Math.floor(s / 60), ss = Math.floor(s % 60);
   return `${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
@@ -319,7 +333,14 @@ function enqueueSegment(audio, t0, srcSetting) {
       const tStart = performance.now();
       const text = await transcribe(audio, WHISPER_LANG[srcSetting] || null);
       const asrMs = Math.round(performance.now() - tStart);
-      if (!text || HALLUCINATIONS.some((r) => r.test(text))) return;
+      if (!text) {
+        addSkipNote(t0, `略過：辨識結果為空（音訊 ${audioS.toFixed(1)}s，可能太小聲或只有雜音）`);
+        return;
+      }
+      if (HALLUCINATIONS.some((r) => r.test(text))) {
+        addSkipNote(t0, `略過：被當成幻覺濾掉「${text}」`);
+        return;
+      }
       const entry = addEntry(t0, text, { audioS, waitMs: Math.round(tStart - tEnq), asrMs });
       entry.showTiming();
 
@@ -327,6 +348,7 @@ function enqueueSegment(audio, t0, srcSetting) {
       queueForTranslation(entry, srcSetting);
     } catch (err) {
       setStatus(`辨識錯誤：${err.message}`, true);
+      addSkipNote(t0, `略過：辨識錯誤 ${err.message}`);
     } finally {
       backlog--;
       if (running && backlog <= 3) setStatus('口譯中…（側欄關閉就會停止）');
@@ -380,7 +402,11 @@ async function start() {
     mute.gain.value = 0;
     source.connect(workletNode).connect(mute).connect(ctx.destination);
 
-    segmenter = makeSegmenter(ctx.sampleRate, (audio, t0) => enqueueSegment(audio, t0, srcSetting));
+    segmenter = makeSegmenter(
+      ctx.sampleRate,
+      (audio, t0) => enqueueSegment(audio, t0, srcSetting),
+      (t0, voicedS) => addSkipNote(t0, `略過：有聲音的部分只有 ${voicedS.toFixed(1)}s，太短`),
+    );
     workletNode.port.onmessage = (e) => segmenter?.push(e.data);
 
     stream.getAudioTracks()[0].addEventListener('ended', () => stop());
@@ -413,7 +439,7 @@ function stop() {
 }
 
 // 把原始取樣率降到 16kHz，並依停頓切段
-function makeSegmenter(inRate, onSegment) {
+function makeSegmenter(inRate, onSegment, onDrop) {
   const ratio = inRate / SR;
   let frac = 0;
   let frame = new Float32Array(FRAME), fLen = 0;
@@ -441,6 +467,8 @@ function makeSegmenter(inRate, onSegment) {
       frames.forEach((f, i) => audio.set(f, i * FRAME));
       if (g > 1) for (let i = 0; i < audio.length; i++) audio[i] = Math.max(-1, Math.min(1, audio[i] * g));
       onSegment(audio, segStart);
+    } else if (frames.length && voiced * 0.1 >= MIN_NOTE_VOICED_S) {
+      onDrop?.(segStart, voiced * 0.1);
     }
     frames = []; rmsArr = []; voiced = 0; trailingSilent = 0; pre = [];
   }
