@@ -6,6 +6,12 @@ env.useBrowserCache = true; // 模型下載一次後會快取
 env.backends.onnx.wasm.wasmPaths = new URL('./lib/', import.meta.url).href;
 env.backends.onnx.wasm.numThreads = 1;
 
+// 解碼參數：語速快或音質差時，beam search 比貪婪解碼不容易選錯字（較慢）
+const NUM_BEAMS = 4;
+const MAX_NEW_TOKENS = 400;     // 快語速的 10 秒日文可能超過 224 個 token；Whisper 上限 448
+const NO_REPEAT_NGRAM = 6;      // 禁止連續重複 6 個 token 的片語，擋掉模糊音訊常見的重複迴圈
+let beamsOk = true;
+
 let asr = null;
 let loadedKey = null;
 
@@ -65,12 +71,23 @@ self.onmessage = async (e) => {
       const info = await load(m.model);
       self.postMessage({ type: 'loaded', ...info });
     } else if (m.type === 'transcribe') {
-      const out = await asr(m.audio, {
+      const base = {
         language: m.language || null,
         task: 'transcribe',
         chunk_length_s: 30,
-        max_new_tokens: 224, // 避免幻覺時一路生成到上限
-      });
+        max_new_tokens: MAX_NEW_TOKENS,
+      };
+      let out;
+      if (beamsOk) {
+        try {
+          out = await asr(m.audio, { ...base, num_beams: NUM_BEAMS, no_repeat_ngram_size: NO_REPEAT_NGRAM });
+        } catch (err) {
+          // beam search 在某些環境可能不支援，退回貪婪解碼，並且之後不再嘗試
+          console.warn('[asr] beam search 失敗，改用貪婪解碼', err);
+          beamsOk = false;
+        }
+      }
+      if (!out) out = await asr(m.audio, base);
       self.postMessage({ type: 'result', id: m.id, text: (out.text || '').trim() });
     }
   } catch (err) {

@@ -4,7 +4,11 @@ const SR = 16000;               // Whisper 需要 16kHz
 const FRAME = SR / 10;          // 100ms 一個音框，用來判斷有沒有人說話
 const SILENCE_RMS = 0.008;      // 低於這個音量視為靜音
 const MIN_SEG_S = 3;            // 一段至少 3 秒才切（太短會把一句話拆開，翻譯失去上下文）
-const MAX_SEG_S = 10;           // 最長 10 秒強制切
+const MAX_SEG_S = 8;            // 累積到 8 秒還沒遇到停頓，就在最安靜的地方切（快語速也不會一段塞太多字）
+const CUT_SEARCH_FROM_S = 4;    // 到上限時，只在這個時間點之後找最安靜的音框來切
+const PRE_ROLL_FRAMES = 3;      // 段落開頭往前多帶 0.3 秒，避免吃掉輕聲的字頭
+const TARGET_RMS = 0.1;         // 送辨識前，把說話部分的音量拉到這個程度（只放大，不縮小）
+const MAX_GAIN = 8;             // 最多放大幾倍，避免把底噪放大成人聲
 const END_SILENCE_S = 0.6;      // 講完停頓 0.6 秒就切段
 const LONG_SEG_S = 6;           // 累積超過 6 秒後，改用較短的停頓就切，避免硬切在字中間
 const LONG_END_SILENCE_S = 0.35;
@@ -225,7 +229,7 @@ function fmtTime(s) {
 }
 
 function showEmpty() {
-  els.list.innerHTML = '<div class="empty">還沒有內容。播放影片後，大約每 3～10 秒會出現一段。</div>';
+  els.list.innerHTML = '<div class="empty">還沒有內容。播放影片後，大約每 3～8 秒會出現一段。</div>';
 }
 showEmpty();
 
@@ -413,38 +417,81 @@ function makeSegmenter(inRate, onSegment) {
   const ratio = inRate / SR;
   let frac = 0;
   let frame = new Float32Array(FRAME), fLen = 0;
-  let frames = [], voiced = 0, trailingSilent = 0;
+  let frames = [], rmsArr = [];   // rmsArr 與 frames 一一對應：每個音框的音量
+  let voiced = 0, trailingSilent = 0;
+  let pre = [];                   // 還沒開始錄段落時，最近幾個安靜的音框（當作開頭留白）
   let totalOut = 0;
   let segStart = 0;
   let quiet = 0;                  // 距離最後一個有聲音框已經過了幾個音框（不論有沒有在錄段落）
 
+  const isLoud = (r) => r > SILENCE_RMS;
+
+  // 把說話部分的音量拉到 TARGET_RMS 左右（取 90 百分位，不被突波影響）；只放大
+  function gainFor() {
+    const v = rmsArr.filter(isLoud).sort((a, b) => a - b);
+    if (!v.length) return 1;
+    const p90 = v[Math.floor(0.9 * (v.length - 1))];
+    return Math.min(MAX_GAIN, Math.max(1, TARGET_RMS / p90));
+  }
+
   function flush() {
     if (frames.length && voiced * 0.1 >= MIN_VOICED_S) {
+      const g = gainFor();
       const audio = new Float32Array(frames.length * FRAME);
       frames.forEach((f, i) => audio.set(f, i * FRAME));
+      if (g > 1) for (let i = 0; i < audio.length; i++) audio[i] = Math.max(-1, Math.min(1, audio[i] * g));
       onSegment(audio, segStart);
     }
-    frames = []; voiced = 0; trailingSilent = 0;
+    frames = []; rmsArr = []; voiced = 0; trailingSilent = 0; pre = [];
+  }
+
+  // 累積到上限仍沒遇到停頓（快語速）：回頭找最安靜的音框切，後面的音訊留給下一段，不丟失
+  function cutAtDip() {
+    const from = Math.min(frames.length - 1, Math.floor(CUT_SEARCH_FROM_S * 10));
+    let idx = from;
+    for (let i = from; i < frames.length; i++) if (rmsArr[i] <= rmsArr[idx]) idx = i;
+
+    const tailF = frames.slice(idx + 1), tailR = rmsArr.slice(idx + 1);
+    const nextStart = segStart + (idx + 1) / 10;
+    frames = frames.slice(0, idx + 1); rmsArr = rmsArr.slice(0, idx + 1);
+    voiced = rmsArr.filter(isLoud).length;
+    flush();
+
+    const tailVoiced = tailR.filter(isLoud).length;
+    if (!tailVoiced) {              // 剩下的全是安靜：不開新段，只留作下一段的開頭留白
+      pre = tailF.slice(-PRE_ROLL_FRAMES).map((f, i, a) => ({ f, r: tailR[tailR.length - a.length + i] }));
+      return;
+    }
+    frames = tailF; rmsArr = tailR; voiced = tailVoiced; segStart = nextStart;
+    trailingSilent = 0;
+    for (let i = tailR.length - 1; i >= 0 && !isLoud(tailR[i]); i--) trailingSilent++;
   }
 
   function onFrame(f) {
     let sum = 0;
     for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
-    const loud = Math.sqrt(sum / f.length) > SILENCE_RMS;
+    const r = Math.sqrt(sum / f.length);
+    const loud = isLoud(r);
     quiet = loud ? 0 : quiet + 1;
 
     if (!frames.length) {
-      if (!loud) return;           // 段落從有聲音的地方開始
-      segStart = totalOut / SR;
+      if (!loud) {                 // 段落從有聲音的地方開始；先記下最近幾個安靜音框當開頭留白
+        pre.push({ f, r });
+        if (pre.length > PRE_ROLL_FRAMES) pre.shift();
+        return;
+      }
+      frames = pre.map((p) => p.f); rmsArr = pre.map((p) => p.r);
+      segStart = Math.max(0, totalOut / SR - (frames.length + 1) / 10);
+      pre = [];
     }
-    frames.push(f);
+    frames.push(f); rmsArr.push(r);
     if (loud) { voiced++; trailingSilent = 0; } else trailingSilent++;
 
     const dur = frames.length / 10;
     const trailS = trailingSilent / 10;
     if ((dur >= MIN_SEG_S && trailS >= END_SILENCE_S) ||
-        (dur >= LONG_SEG_S && trailS >= LONG_END_SILENCE_S) ||
-        dur >= MAX_SEG_S) flush();
+        (dur >= LONG_SEG_S && trailS >= LONG_END_SILENCE_S)) flush();
+    else if (dur >= MAX_SEG_S) cutAtDip();
   }
 
   return {
