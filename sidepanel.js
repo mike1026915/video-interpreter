@@ -3,9 +3,11 @@ const TARGET = 'zh-Hant';
 const SR = 16000;               // Whisper 需要 16kHz
 const FRAME = SR / 10;          // 100ms 一個音框，用來判斷有沒有人說話
 const SILENCE_RMS = 0.008;      // 低於這個音量視為靜音
-const MIN_SEG_S = 2;            // 一段至少 2 秒才切
+const MIN_SEG_S = 3;            // 一段至少 3 秒才切（太短會把一句話拆開，翻譯失去上下文）
 const MAX_SEG_S = 10;           // 最長 10 秒強制切
-const END_SILENCE_S = 0.5;      // 講完停頓 0.5 秒就切段
+const END_SILENCE_S = 0.6;      // 講完停頓 0.6 秒就切段
+const LONG_SEG_S = 6;           // 累積超過 6 秒後，改用較短的停頓就切，避免硬切在字中間
+const LONG_END_SILENCE_S = 0.35;
 const MIN_VOICED_S = 0.5;       // 有聲音的部分不到 0.5 秒就丟掉（避免 Whisper 對靜音亂講）
 
 const WHISPER_LANG = {
@@ -202,7 +204,7 @@ function fmtTime(s) {
 }
 
 function showEmpty() {
-  els.list.innerHTML = '<div class="empty">還沒有內容。播放影片後，大約每 2～10 秒會出現一段。</div>';
+  els.list.innerHTML = '<div class="empty">還沒有內容。播放影片後，大約每 3～10 秒會出現一段。</div>';
 }
 showEmpty();
 
@@ -351,7 +353,10 @@ function makeSegmenter(inRate, onSegment) {
     if (loud) { voiced++; trailingSilent = 0; } else trailingSilent++;
 
     const dur = frames.length / 10;
-    if ((dur >= MIN_SEG_S && trailingSilent / 10 >= END_SILENCE_S) || dur >= MAX_SEG_S) flush();
+    const trailS = trailingSilent / 10;
+    if ((dur >= MIN_SEG_S && trailS >= END_SILENCE_S) ||
+        (dur >= LONG_SEG_S && trailS >= LONG_END_SILENCE_S) ||
+        dur >= MAX_SEG_S) flush();
   }
 
   return {
