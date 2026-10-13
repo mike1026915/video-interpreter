@@ -88,10 +88,17 @@ const fileProgress = new Map();
 // WebGPU 跑不動的模型 -> 失敗原因。這些模型直接在新的 worker 裡用 CPU 載入，不再試 WebGPU。
 const gpuBroken = new Map();
 
+let workerModel = null;         // 目前這個 worker 載入（或正在載入）的模型
+let workerDirty = false;        // 這個 worker 出過錯（WebGPU 失敗後可能整個壞掉），下次載入要換新的
+
 function spawnWorker() {
   worker?.terminate();
+  // 舊 worker 裡還沒回來的辨識結果不會再回來了，先讓它們失敗，免得佇列卡住
+  for (const p of pendingAsr.values()) p.reject(new Error('辨識 worker 已重新啟動'));
+  pendingAsr.clear();
   worker = new Worker('asr-worker.js', { type: 'module' });
   worker.onmessage = onWorkerMessage;
+  workerDirty = false;
 }
 spawnWorker();
 
@@ -112,6 +119,7 @@ function onWorkerMessage(e) {
     gpuBroken.set(m.model, m.reason);
     setStatus(`WebGPU 無法執行這個模型，重新啟動並改用 CPU…（${m.reason.slice(0, 120)}）`, true);
     spawnWorker();
+    fileProgress.clear();
     worker.postMessage({ type: 'load', model: m.model, forceWasm: true, reason: m.reason });
   } else if (m.type === 'loaded') {
     els.progress.hidden = true;
@@ -121,6 +129,8 @@ function onWorkerMessage(e) {
       workerReady.reject(new Error(m.message));
       return;
     }
+    // 辨識時出現 WebGPU 執行錯誤：這個 worker 可能已經壞掉，下次按「開始」時換一個新的
+    if (m.type === 'error' && /\[WebGPU\]|Kernel/i.test(m.message)) workerDirty = true;
     const p = pendingAsr.get(m.id);
     pendingAsr.delete(m.id);
     if (!p) return;
@@ -129,6 +139,11 @@ function onWorkerMessage(e) {
 }
 
 function loadModel(model) {
+  // 換模型、上次載入失敗、或辨識時出過 WebGPU 錯誤：都換一個全新的 worker，
+  // 不要在可能已經壞掉的 ONNX Runtime 上繼續載入（那樣會一直失敗、一直重新下載）。
+  // 模型檔有瀏覽器快取，換 worker 不會重新下載。
+  if (workerDirty || (workerModel && workerModel !== model)) spawnWorker();
+  workerModel = model;
   fileProgress.clear();
   let resolve, reject;
   const promise = new Promise((a, b) => { resolve = a; reject = b; });
@@ -139,6 +154,7 @@ function loadModel(model) {
   };
   const reason = gpuBroken.get(model);
   worker.postMessage({ type: 'load', model, forceWasm: !!reason, reason });
+  promise.catch(() => { workerDirty = true; });
   return promise;
 }
 
