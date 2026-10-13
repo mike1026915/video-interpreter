@@ -231,37 +231,46 @@ showEmpty();
 
 // ===== 句子合併：等到句尾再整句翻譯 =====
 // 日文常把一句話拆在好幾段音訊裡，單段翻譯會失去上下文。
-// 辨識出的原文先立刻顯示，翻譯則等到句尾標點（或逾時 / 太長）才把累積的原文合併送出。
+// 辨識出的原文先立刻顯示，翻譯則等到句尾標點，或「說話者停下來了」才把累積的原文合併送出。
+// 「停下來了」不用固定逾時判斷（下一段要錄 3～5 秒再辨識 1～2 秒才會到，固定逾時一定先過期），
+// 而是看切段器：目前沒有正在錄的段落、已經安靜夠久、辨識佇列也空了，才算講完。
 const MAX_GROUP_CHARS = 80;     // 累積超過這麼多字就不等句尾，直接翻
 const MAX_GROUP_SEGS = 4;       // 最多合併幾段
-const GROUP_IDLE_MS = 3500;     // 這麼久沒有新的一段，就當作句子講完了
+const GROUP_QUIET_S = 1.0;      // 距離最後一個有聲音框至少安靜這麼久，才視為說話者停下來了
+const GROUP_MAX_WAIT_MS = 12000; // 保險：從第一段原文出現起，最多等這麼久
 const SENTENCE_END = /[。！？!?.…]["'」』）)]*$/;
 const CJK = /[぀-ヿ㐀-鿿가-힯]/;
 
 let group = { entries: [], srcSetting: null };
-let idleTimer = null;
+let segmenter = null;           // 目前的切段器；沒在擷取時為 null
 
 function resetGroup() {
-  clearTimeout(idleTimer);
   group = { entries: [], srcSetting: null };
 }
+
+// 每 250ms 檢查一次：說話者是不是停下來了
+function checkGroup() {
+  if (!group.entries.length || els.mode.value === 'live') return;
+  const waited = performance.now() - group.entries[0].timing.addedAt;
+  const st = segmenter && segmenter.status();
+  const speechOver = !st || (!st.open && st.quietS >= GROUP_QUIET_S && backlog === 0);
+  if (speechOver || waited >= GROUP_MAX_WAIT_MS) flushGroup();
+}
+setInterval(checkGroup, 250);
 
 function queueForTranslation(entry, srcSetting) {
   group.srcSetting = srcSetting;
   group.entries.push(entry);
-  clearTimeout(idleTimer);
   const chars = group.entries.reduce((n, e) => n + e.text.length, 0);
   if (els.mode.value === 'live' || SENTENCE_END.test(entry.text.trim()) ||
       chars >= MAX_GROUP_CHARS || group.entries.length >= MAX_GROUP_SEGS) {
     flushGroup();
   } else {
     group.entries.forEach((e) => e.setPending('等待整句講完再翻譯…'));
-    idleTimer = setTimeout(flushGroup, GROUP_IDLE_MS);
   }
 }
 
 async function flushGroup() {
-  clearTimeout(idleTimer);
   const { entries, srcSetting } = group;
   resetGroup();
   if (!entries.length) return;
@@ -367,8 +376,8 @@ async function start() {
     mute.gain.value = 0;
     source.connect(workletNode).connect(mute).connect(ctx.destination);
 
-    const seg = makeSegmenter(ctx.sampleRate, (audio, t0) => enqueueSegment(audio, t0, srcSetting));
-    workletNode.port.onmessage = (e) => seg.push(e.data);
+    segmenter = makeSegmenter(ctx.sampleRate, (audio, t0) => enqueueSegment(audio, t0, srcSetting));
+    workletNode.port.onmessage = (e) => segmenter?.push(e.data);
 
     stream.getAudioTracks()[0].addEventListener('ended', () => stop());
     running = true;
@@ -386,7 +395,7 @@ function cleanup() {
   workletNode?.disconnect();
   stream?.getTracks().forEach((t) => t.stop());
   ctx?.close().catch(() => {});
-  workletNode = null; stream = null; ctx = null;
+  workletNode = null; stream = null; ctx = null; segmenter = null;
 }
 
 function stop() {
@@ -407,6 +416,7 @@ function makeSegmenter(inRate, onSegment) {
   let frames = [], voiced = 0, trailingSilent = 0;
   let totalOut = 0;
   let segStart = 0;
+  let quiet = 0;                  // 距離最後一個有聲音框已經過了幾個音框（不論有沒有在錄段落）
 
   function flush() {
     if (frames.length && voiced * 0.1 >= MIN_VOICED_S) {
@@ -421,6 +431,7 @@ function makeSegmenter(inRate, onSegment) {
     let sum = 0;
     for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
     const loud = Math.sqrt(sum / f.length) > SILENCE_RMS;
+    quiet = loud ? 0 : quiet + 1;
 
     if (!frames.length) {
       if (!loud) return;           // 段落從有聲音的地方開始
@@ -437,6 +448,8 @@ function makeSegmenter(inRate, onSegment) {
   }
 
   return {
+    // open：正有一段在錄（說話者還在講）；quietS：最後一次有聲音到現在的秒數
+    status() { return { open: frames.length > 0, quietS: quiet / 10 }; },
     push(chunk) {
       // 簡單平均降取樣
       let pos = frac;
