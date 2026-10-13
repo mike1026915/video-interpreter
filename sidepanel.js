@@ -3,9 +3,9 @@ const TARGET = 'zh-Hant';
 const SR = 16000;               // Whisper 需要 16kHz
 const FRAME = SR / 10;          // 100ms 一個音框，用來判斷有沒有人說話
 const SILENCE_RMS = 0.008;      // 低於這個音量視為靜音
-const MIN_SEG_S = 3;            // 一段至少 3 秒才切
-const MAX_SEG_S = 15;           // 最長 15 秒強制切
-const END_SILENCE_S = 0.7;      // 講完停頓 0.7 秒就切段
+const MIN_SEG_S = 2;            // 一段至少 2 秒才切
+const MAX_SEG_S = 10;           // 最長 10 秒強制切
+const END_SILENCE_S = 0.5;      // 講完停頓 0.5 秒就切段
 const MIN_VOICED_S = 0.5;       // 有聲音的部分不到 0.5 秒就丟掉（避免 Whisper 對靜音亂講）
 
 const WHISPER_LANG = {
@@ -150,29 +150,41 @@ els.dl.onclick = async () => {
 };
 
 async function translateEntry(entry, src, tr) {
+  const t = performance.now();
   try {
     entry.setZh(await tr.translate(entry.text));
   } catch (err) {
     entry.setZh(`（翻譯失敗：${err.message}）`);
   }
+  entry.timing.translateMs = Math.round(performance.now() - t);
+  entry.showTiming();
 }
 
 // ===== 畫面上的每一段 =====
 const transcript = [];
 
-function addEntry(t0, text) {
+function addEntry(t0, text, timing = {}) {
   els.list.querySelector('.empty')?.remove();
   const div = document.createElement('div');
   div.className = 'item';
   div.innerHTML = '<div class="t"></div><div class="src"></div><div class="zh pending">翻譯中…</div>';
-  div.querySelector('.t').textContent = fmtTime(t0);
+  const tEl = div.querySelector('.t');
+  tEl.textContent = fmtTime(t0);
   div.querySelector('.src').textContent = text;
   const zhEl = div.querySelector('.zh');
   const nearBottom = els.list.scrollHeight - els.list.scrollTop - els.list.clientHeight < 80;
   els.list.appendChild(div);
   if (nearBottom) els.list.scrollTop = els.list.scrollHeight;
   const entry = {
-    t0, text, zh: '',
+    t0, text, zh: '', timing,
+    // 在時間旁顯示各階段耗時，方便判斷慢在哪：音訊長度 / 排隊 / 辨識 / 翻譯
+    showTiming() {
+      const s = (ms) => (ms / 1000).toFixed(1);
+      const parts = [`音訊${timing.audioS.toFixed(1)}s`, `排隊${s(timing.waitMs)}s`, `辨識${s(timing.asrMs)}s`];
+      if (timing.translateMs != null) parts.push(`翻譯${s(timing.translateMs)}s`);
+      tEl.textContent = `${fmtTime(t0)} · ${parts.join(' · ')}`;
+      console.log('[timing]', fmtTime(t0), timing);
+    },
     setZh(s) {
       entry.zh = s;
       zhEl.textContent = s;
@@ -190,7 +202,7 @@ function fmtTime(s) {
 }
 
 function showEmpty() {
-  els.list.innerHTML = '<div class="empty">還沒有內容。播放影片後，大約每 3～15 秒會出現一段。</div>';
+  els.list.innerHTML = '<div class="empty">還沒有內容。播放影片後，大約每 2～10 秒會出現一段。</div>';
 }
 showEmpty();
 
@@ -201,11 +213,16 @@ let backlog = 0;
 function enqueueSegment(audio, t0, srcSetting) {
   backlog++;
   if (backlog > 3) setStatus(`辨識速度跟不上（積了 ${backlog} 段），可以改用較小的模型`, true);
+  const audioS = audio.length / SR; // transcribe 會轉移 buffer，先記下長度
+  const tEnq = performance.now();
   queue = queue.then(async () => {
     try {
+      const tStart = performance.now();
       const text = await transcribe(audio, WHISPER_LANG[srcSetting] || null);
+      const asrMs = Math.round(performance.now() - tStart);
       if (!text || HALLUCINATIONS.some((r) => r.test(text))) return;
-      const entry = addEntry(t0, text);
+      const entry = addEntry(t0, text, { audioS, waitMs: Math.round(tStart - tEnq), asrMs });
+      entry.showTiming();
 
       let src = srcSetting === 'auto' ? await detectLang(text) : srcSetting;
       if (!src) { entry.setZh('（無法判斷語言）'); return; }

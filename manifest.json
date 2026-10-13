@@ -8,6 +8,8 @@
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "開啟影片口譯側欄" },
   "side_panel": { "default_path": "sidepanel.html" },
+  "cross_origin_embedder_policy": { "value": "require-corp" },
+  "cross_origin_opener_policy": { "value": "same-origin" },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   }
