@@ -97,7 +97,7 @@ function transcribe(audio, language) {
 // ===== Chrome 內建翻譯 / 語言偵測 =====
 const translators = new Map();    // src -> Promise<Translator>
 let detector = null;
-const waitingForTranslator = new Map(); // src -> [entry...]
+const waitingForTranslator = new Map(); // src -> [翻譯單位...]
 
 function langName(code) {
   try { return new Intl.DisplayNames(['zh-Hant'], { type: 'language' }).of(code); } catch { return code; }
@@ -144,22 +144,28 @@ els.dl.onclick = async () => {
   for (const [src, list] of entries) {
     try {
       const tr = await getTranslator(src, true);
-      for (const entry of list) translateEntry(entry, src, tr);
+      for (const unit of list) translateUnit(unit, src, tr);
     } catch (err) {
-      for (const entry of list) entry.setZh(`（翻譯失敗：${err.message}）`);
+      for (const unit of list) unit.last.setZh(`（翻譯失敗：${err.message}）`);
     }
   }
 };
 
-async function translateEntry(entry, src, tr) {
+// 翻譯單位 = 一個「句子」，可能由好幾段音訊的原文合併而成；譯文顯示在最後一段
+async function translateUnit(unit, src, tr) {
+  const { last } = unit;
+  if (src === 'zh') {
+    unit.entries.forEach((e) => e.setZh(e.text));
+    return;
+  }
   const t = performance.now();
   try {
-    entry.setZh(await tr.translate(entry.text));
+    last.setZh(await tr.translate(unit.text));
   } catch (err) {
-    entry.setZh(`（翻譯失敗：${err.message}）`);
+    last.setZh(`（翻譯失敗：${err.message}）`);
   }
-  entry.timing.translateMs = Math.round(performance.now() - t);
-  entry.showTiming();
+  last.timing.translateMs = Math.round(performance.now() - t);
+  last.showTiming();
 }
 
 // ===== 畫面上的每一段 =====
@@ -183,6 +189,7 @@ function addEntry(t0, text, timing = {}) {
     showTiming() {
       const s = (ms) => (ms / 1000).toFixed(1);
       const parts = [`音訊${timing.audioS.toFixed(1)}s`, `排隊${s(timing.waitMs)}s`, `辨識${s(timing.asrMs)}s`];
+      if (timing.joinWaitMs != null) parts.push(`等句尾${s(timing.joinWaitMs)}s`);
       if (timing.translateMs != null) parts.push(`翻譯${s(timing.translateMs)}s`);
       tEl.textContent = `${fmtTime(t0)} · ${parts.join(' · ')}`;
       console.log('[timing]', fmtTime(t0), timing);
@@ -193,7 +200,15 @@ function addEntry(t0, text, timing = {}) {
       zhEl.classList.remove('pending');
     },
     setPending(s) { zhEl.textContent = s; zhEl.classList.add('pending'); },
+    markGrouped() { div.classList.add('grouped'); },
+    // 這段原文已併入下方的整句翻譯
+    setMerged() {
+      div.classList.add('grouped');
+      zhEl.textContent = '↓ 與下方合併成一句翻譯';
+      zhEl.classList.add('pending');
+    },
   };
+  timing.addedAt = performance.now();
   transcript.push(entry);
   return entry;
 }
@@ -208,7 +223,69 @@ function showEmpty() {
 }
 showEmpty();
 
-// ===== 處理一段語音：辨識 → 翻譯 =====
+// ===== 句子合併：等到句尾再整句翻譯 =====
+// 日文常把一句話拆在好幾段音訊裡，單段翻譯會失去上下文。
+// 辨識出的原文先立刻顯示，翻譯則等到句尾標點（或逾時 / 太長）才把累積的原文合併送出。
+const MAX_GROUP_CHARS = 80;     // 累積超過這麼多字就不等句尾，直接翻
+const MAX_GROUP_SEGS = 4;       // 最多合併幾段
+const GROUP_IDLE_MS = 3500;     // 這麼久沒有新的一段，就當作句子講完了
+const SENTENCE_END = /[。！？!?.…]["'」』）)]*$/;
+const CJK = /[぀-ヿ㐀-鿿가-힯]/;
+
+let group = { entries: [], srcSetting: null };
+let idleTimer = null;
+
+function resetGroup() {
+  clearTimeout(idleTimer);
+  group = { entries: [], srcSetting: null };
+}
+
+function queueForTranslation(entry, srcSetting) {
+  group.srcSetting = srcSetting;
+  group.entries.push(entry);
+  clearTimeout(idleTimer);
+  const chars = group.entries.reduce((n, e) => n + e.text.length, 0);
+  if (SENTENCE_END.test(entry.text.trim()) || chars >= MAX_GROUP_CHARS || group.entries.length >= MAX_GROUP_SEGS) {
+    flushGroup();
+  } else {
+    group.entries.forEach((e) => e.setPending('等待整句講完再翻譯…'));
+    idleTimer = setTimeout(flushGroup, GROUP_IDLE_MS);
+  }
+}
+
+async function flushGroup() {
+  clearTimeout(idleTimer);
+  const { entries, srcSetting } = group;
+  resetGroup();
+  if (!entries.length) return;
+
+  const last = entries[entries.length - 1];
+  if (entries.length > 1) {
+    entries.slice(0, -1).forEach((e) => e.setMerged());
+    last.markGrouped();
+  }
+  last.setPending('翻譯中…');
+  last.timing.joinWaitMs = Math.round(performance.now() - entries[0].timing.addedAt);
+
+  const texts = entries.map((e) => e.text);
+  const unit = { entries, last, text: texts.join(CJK.test(texts[0]) ? '' : ' ') };
+  try {
+    const src = srcSetting === 'auto' ? await detectLang(unit.text) : srcSetting;
+    if (!src) { last.setZh('（無法判斷語言）'); return; }
+    if (src === 'zh') return translateUnit(unit, src, null);
+
+    const tr = await getTranslator(src, false);
+    if (tr) return translateUnit(unit, src, tr);
+    last.setPending('等待下載翻譯模型…');
+    if (!waitingForTranslator.has(src)) waitingForTranslator.set(src, []);
+    waitingForTranslator.get(src).push(unit);
+    showTranslatorButton();
+  } catch (err) {
+    last.setZh(`（翻譯失敗：${err.message}）`);
+  }
+}
+
+// ===== 處理一段語音：辨識 → 排入整句翻譯 =====
 let queue = Promise.resolve();
 let backlog = 0;
 
@@ -226,16 +303,8 @@ function enqueueSegment(audio, t0, srcSetting) {
       const entry = addEntry(t0, text, { audioS, waitMs: Math.round(tStart - tEnq), asrMs });
       entry.showTiming();
 
-      let src = srcSetting === 'auto' ? await detectLang(text) : srcSetting;
-      if (!src) { entry.setZh('（無法判斷語言）'); return; }
-      if (src === 'zh') { entry.setZh(text); return; }
-
-      const tr = await getTranslator(src, false);
-      if (tr) return translateEntry(entry, src, tr);
-      entry.setPending('等待下載翻譯模型…');
-      if (!waitingForTranslator.has(src)) waitingForTranslator.set(src, []);
-      waitingForTranslator.get(src).push(entry);
-      showTranslatorButton();
+      if (srcSetting === 'zh') { entry.setZh(text); return; }
+      queueForTranslation(entry, srcSetting);
     } catch (err) {
       setStatus(`辨識錯誤：${err.message}`, true);
     } finally {
@@ -320,6 +389,7 @@ function stop() {
   els.start.disabled = false;
   els.stop.disabled = true;
   setStatus('已停止。還在排隊的段落會繼續處理完。');
+  queue = queue.then(() => flushGroup()); // 還沒湊成句的原文也要翻掉
 }
 
 // 把原始取樣率降到 16kHz，並依停頓切段
@@ -380,10 +450,10 @@ function makeSegmenter(inRate, onSegment) {
 // ===== 按鈕 =====
 els.start.onclick = start;
 els.stop.onclick = stop;
-els.clear.onclick = () => { transcript.length = 0; showEmpty(); };
+els.clear.onclick = () => { transcript.length = 0; resetGroup(); showEmpty(); };
 els.exp.onclick = () => {
   if (!transcript.length) return;
-  const text = transcript.map((e) => `[${fmtTime(e.t0)}]\n${e.text}\n${e.zh}\n`).join('\n');
+  const text = transcript.map((e) => `[${fmtTime(e.t0)}]\n${e.text}\n${e.zh ? e.zh + '\n' : ''}`).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
   a.download = `口譯逐字稿-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '')}.txt`;
