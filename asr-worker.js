@@ -28,10 +28,18 @@ async function hasWebGPU() {
   }
 }
 
-// 依序嘗試的量化設定。內建模型第一組就會成功；自訂模型的檔案命名不一定相同，失敗就換下一組。
-// 刻意不放純 fp32：萬一前面都失敗，不要悄悄下載好幾 GB。
+// WebGPU 執行階段的錯誤（某個運算不支援）。這種錯誤之後同一個 worker 可能已經壞掉。
+const isGpuRuntimeErr = (err) => /\[WebGPU\]|Kernel/i.test(errMsg(err));
+// 找不到某組量化的檔案。只有這種錯誤才值得換下一組量化：其他錯誤換了也一樣會壞，
+// 而且每換一組就要重新下載一套模型檔（大模型一套就要 1GB 以上）。
+const isMissingFileErr = (err) => /could not locate|not found|404|no such file/i.test(errMsg(err));
+
+// 依序嘗試的量化設定。內建模型的檔案已知，只用一組，絕不嘗試其他量化（避免悄悄下載別的版本）；
+// 自訂模型的檔案命名不一定相同，找不到檔案時才換下一組。刻意不放純 fp32，避免下載好幾 GB。
 function dtypeCandidates(model, gpu) {
-  if (!gpu) return ['q8', 'q4'];
+  const builtin = model.startsWith('onnx-community/whisper-');
+  if (!gpu) return builtin ? ['q8'] : ['q8', 'q4'];
+  if (builtin) return [{ encoder_model: /large|turbo/i.test(model) ? 'fp16' : 'fp32', decoder_model_merged: 'q4' }];
   const big = /large|turbo|medium|760M|1\.5B/i.test(model);
   const list = [
     { encoder_model: big ? 'fp16' : 'fp32', decoder_model_merged: 'q4' },
@@ -46,20 +54,30 @@ function dtypeCandidates(model, gpu) {
 
 // 載入成功不代表能跑：例如 WebGPU 可能在推論時才發現某個運算不支援
 // （"[WebGPU] Kernel ... Mask not supported"）。所以用 1 秒靜音實際跑一次，順便預熱。
+// 只有 WebGPU 執行階段錯誤算失敗；其他預熱錯誤跟以前一樣只警告（實際辨識通常仍然正常）。
 async function validate() {
+  const silence = new Float32Array(16000);
   try {
-    await asr(new Float32Array(16000), { language: 'english', task: 'transcribe' });
+    await asr(silence, { language: 'english', task: 'transcribe' });
+    return;
   } catch (err) {
-    if (!/language|task/i.test(errMsg(err))) throw err;
-    await asr(new Float32Array(16000)); // 模型不接受 language / task：不帶參數再試一次
+    if (isGpuRuntimeErr(err)) throw err;
+    if (!/language|task/i.test(errMsg(err))) { console.warn('[asr] 預熱失敗（不影響使用）', err); return; }
+  }
+  try {
+    await asr(silence); // 模型不接受 language / task：不帶參數再試一次
+  } catch (err) {
+    if (isGpuRuntimeErr(err)) throw err;
+    console.warn('[asr] 預熱失敗（不影響使用）', err);
   }
 }
 
-async function load(model) {
+// forceWasm：這個模型先前在 WebGPU 上跑不動，側欄已經換了一個全新的 worker，只用 CPU 載入
+async function load(model, forceWasm = false, forcedReason = '') {
   if (asr && loadedModel === model) return loadedInfo;
   if (asr) { try { await asr.dispose(); } catch {} asr = null; loadedModel = null; }
 
-  const gpu = await hasWebGPU();
+  const gpu = !forceWasm && (await hasWebGPU());
   const attempts = [
     ...(gpu ? dtypeCandidates(model, true).map((dtype) => ({ device: 'webgpu', dtype })) : []),
     ...dtypeCandidates(model, false).map((dtype) => ({ device: 'wasm', dtype })),
@@ -70,11 +88,11 @@ async function load(model) {
     }
   };
 
-  let lastErr = null, gpuErr = null, skipGpu = false;
+  let lastErr = null, gpuErr = null;
   for (const { device, dtype } of attempts) {
-    if (device === 'webgpu' && skipGpu) continue;
     if (device === 'wasm') {
       if (gpu && gpuErr) status(`WebGPU 無法執行這個模型，改用 CPU（會慢很多）…（${errMsg(gpuErr).slice(0, 120)}）`);
+      if (forceWasm) status('改用 CPU 載入模型（會慢很多）…');
       // 只有跨來源隔離（manifest 的 COOP/COEP）生效時才有 SharedArrayBuffer，才能開多執行緒
       env.backends.onnx.wasm.numThreads = self.crossOriginIsolated
         ? Math.max(1, Math.min(4, Math.floor((self.navigator.hardwareConcurrency || 2) / 2)))
@@ -88,25 +106,33 @@ async function load(model) {
       await validate();
       console.log(`[asr] 模型 ${model} 使用 ${label} 執行緒 ${env.backends.onnx.wasm.numThreads} 驗證＋預熱 ${Math.round(performance.now() - t0)}ms`);
       loadedModel = model;
-      loadedInfo = { device, fellBack: gpu && device === 'wasm', reason: gpuErr ? errMsg(gpuErr).slice(0, 160) : '' };
+      loadedInfo = {
+        device,
+        fellBack: forceWasm || (gpu && device === 'wasm'),
+        reason: (forcedReason || (gpuErr ? errMsg(gpuErr) : '')).slice(0, 160),
+      };
       return loadedInfo;
     } catch (err) {
       lastErr = err;
-      if (device === 'webgpu') {
-        gpuErr = err;
-        // WebGPU 執行階段的錯誤（某個運算不支援）跟量化無關，換量化也一樣會壞，
-        // 而且每換一組就要重新下載一套模型檔，所以直接改用 CPU。
-        if (/\[WebGPU\]|Kernel/i.test(errMsg(err))) skipGpu = true;
-      }
-      console.warn(`[asr] ${label} 失敗，換下一組設定`, err);
-      status(`${label} 無法使用，嘗試其他設定…（${errMsg(err).slice(0, 120)}）`);
+      console.warn(`[asr] ${label} 失敗`, err);
       if (asr) { try { await asr.dispose(); } catch {} asr = null; }
+      if (device === 'webgpu') gpuErr = err;
+      // WebGPU 執行階段的錯誤（某個運算不支援）跟量化無關，換量化也一樣會壞。
+      // 這種錯誤之後，同一個 worker 裡的 ONNX Runtime 可能已經壞掉，連 CPU session 也會回報同樣的錯誤，
+      // 所以不在這裡改用 CPU，而是請側欄關掉這個 worker、開一個全新的只用 CPU。
+      if (device === 'webgpu' && isGpuRuntimeErr(err)) {
+        throw Object.assign(new Error(errMsg(err)), { restartForCpu: true });
+      }
+      // 其他錯誤不再換下一組：換了也一樣會壞，還會一套接一套地下載模型檔
+      if (!isMissingFileErr(err)) break;
+      status(`${label} 找不到對應的模型檔，嘗試其他量化設定…（${errMsg(err).slice(0, 120)}）`);
     }
   }
   throw new Error(`模型 ${model} 無法載入或執行：${errMsg(lastErr)}`);
 }
 
 async function decode(audio, language) {
+  if (!asr) throw new Error('辨識模型尚未載入成功');
   const opts = { chunk_length_s: 30, max_new_tokens: MAX_NEW_TOKENS };
   if (langOk) { opts.language = language || null; opts.task = 'transcribe'; }
 
@@ -138,7 +164,14 @@ self.onmessage = async (e) => {
     if (m.type === 'load') {
       langOk = true;  // 換模型時重新嘗試
       beamsOk = true;
-      const info = await load(m.model);
+      let info;
+      try {
+        info = await load(m.model, !!m.forceWasm, m.reason || '');
+      } catch (err) {
+        if (!err.restartForCpu) throw err;
+        self.postMessage({ type: 'restart', model: m.model, reason: errMsg(err) });
+        return;
+      }
       self.postMessage({ type: 'loaded', ...info });
     } else if (m.type === 'transcribe') {
       const out = await decode(m.audio, m.language);
