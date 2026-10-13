@@ -38,8 +38,22 @@ async function load(model) {
   } else {
     opts.device = 'wasm';
     opts.dtype = 'q8';
+    // 只有跨來源隔離（manifest 的 COOP/COEP）生效時才有 SharedArrayBuffer，才能開多執行緒
+    env.backends.onnx.wasm.numThreads = self.crossOriginIsolated
+      ? Math.max(1, Math.min(4, Math.floor((self.navigator.hardwareConcurrency || 2) / 2)))
+      : 1;
   }
   asr = await pipeline('automatic-speech-recognition', model, opts);
+
+  // 預熱：第一次推論要編譯 shader / 初始化，先用靜音跑一次，免得第一段特別慢
+  const t0 = performance.now();
+  try {
+    await asr(new Float32Array(16000), { language: 'english', task: 'transcribe' });
+  } catch (err) {
+    console.warn('[asr] 預熱失敗（不影響使用）', err);
+  }
+  console.log(`[asr] 模型 ${model} 裝置 ${opts.device} 執行緒 ${env.backends.onnx.wasm.numThreads} 預熱 ${Math.round(performance.now() - t0)}ms`);
+
   loadedKey = key;
   return { device: opts.device };
 }
@@ -55,6 +69,7 @@ self.onmessage = async (e) => {
         language: m.language || null,
         task: 'transcribe',
         chunk_length_s: 30,
+        max_new_tokens: 224, // 避免幻覺時一路生成到上限
       });
       self.postMessage({ type: 'result', id: m.id, text: (out.text || '').trim() });
     }
