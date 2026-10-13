@@ -24,7 +24,7 @@ const HALLUCINATIONS = [
 // ===== DOM =====
 const $ = (id) => document.getElementById(id);
 const els = {
-  srcLang: $('srcLang'), model: $('model'), start: $('startBtn'), stop: $('stopBtn'),
+  srcLang: $('srcLang'), model: $('model'), mode: $('mode'), start: $('startBtn'), stop: $('stopBtn'),
   exp: $('exportBtn'), clear: $('clearBtn'), status: $('status'), progress: $('progress'),
   dl: $('dlTranslatorBtn'), list: $('list'),
 };
@@ -35,12 +35,18 @@ function setStatus(text, isErr = false) {
 }
 
 // ===== 設定記憶 =====
-chrome.storage.local.get(['srcLang', 'model']).then((s) => {
+chrome.storage.local.get(['srcLang', 'model', 'mode']).then((s) => {
   if (s.srcLang) els.srcLang.value = s.srcLang;
   if (s.model) els.model.value = s.model;
+  if (s.mode) els.mode.value = s.mode;
 });
 els.srcLang.onchange = () => chrome.storage.local.set({ srcLang: els.srcLang.value });
 els.model.onchange = () => chrome.storage.local.set({ model: els.model.value });
+els.mode.onchange = () => {
+  chrome.storage.local.set({ mode: els.mode.value });
+  // 切到即時：把已經在等句尾的原文馬上翻掉
+  if (els.mode.value === 'live') flushGroup();
+};
 
 // ===== Whisper worker =====
 const worker = new Worker('asr-worker.js', { type: 'module' });
@@ -245,7 +251,8 @@ function queueForTranslation(entry, srcSetting) {
   group.entries.push(entry);
   clearTimeout(idleTimer);
   const chars = group.entries.reduce((n, e) => n + e.text.length, 0);
-  if (SENTENCE_END.test(entry.text.trim()) || chars >= MAX_GROUP_CHARS || group.entries.length >= MAX_GROUP_SEGS) {
+  if (els.mode.value === 'live' || SENTENCE_END.test(entry.text.trim()) ||
+      chars >= MAX_GROUP_CHARS || group.entries.length >= MAX_GROUP_SEGS) {
     flushGroup();
   } else {
     group.entries.forEach((e) => e.setPending('等待整句講完再翻譯…'));
