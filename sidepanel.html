@@ -27,6 +27,12 @@
           <option value="onnx-community/whisper-large-v3-turbo">large-v3-turbo（最準，需好顯卡）</option>
         </select>
       </label>
+      <label>翻譯方式
+        <select id="mode">
+          <option value="accurate" selected>精準（等句尾整句翻）</option>
+          <option value="live">即時（每段立刻翻）</option>
+        </select>
+      </label>
     </div>
     <div class="row">
       <button id="startBtn" class="primary">開始口譯</button>
