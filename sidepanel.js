@@ -351,6 +351,8 @@ async function flushGroup() {
 // ===== 處理一段語音：辨識 → 排入整句翻譯 =====
 let queue = Promise.resolve();
 let backlog = 0;
+let runNote = '';               // 狀態列上「GPU 加速 / 改用 CPU」的說明，辨識完每段都會重新顯示
+let runNoteIsWarn = false;
 
 function enqueueSegment(audio, t0, srcSetting) {
   backlog++;
@@ -380,7 +382,7 @@ function enqueueSegment(audio, t0, srcSetting) {
       addSkipNote(t0, `略過：辨識錯誤 ${err.message}`);
     } finally {
       backlog--;
-      if (running && backlog <= 3) setStatus('口譯中…（側欄關閉就會停止）');
+      if (running && backlog <= 3) setStatus(`口譯中…（${runNote}；側欄關閉就會停止）`, runNoteIsWarn);
     }
   });
 }
@@ -442,7 +444,13 @@ async function start() {
     stream.getAudioTracks()[0].addEventListener('ended', () => stop());
     running = true;
     els.stop.disabled = false;
-    setStatus(`口譯中…（${info.device === 'webgpu' ? 'GPU 加速' : '沒有 GPU，使用 CPU，會比較慢'}；側欄關閉就會停止）`);
+    const deviceNote = info.device === 'webgpu' ? 'GPU 加速'
+      : info.fellBack ? 'WebGPU 無法執行這個模型，改用 CPU，會慢很多；建議換回內建模型'
+      : '沒有 GPU，使用 CPU，會比較慢';
+    runNote = deviceNote;
+    runNoteIsWarn = !!info.fellBack;
+    setStatus(`口譯中…（${deviceNote}；側欄關閉就會停止）`, runNoteIsWarn);
+    if (info.fellBack) console.warn('[asr] WebGPU 失敗原因：', info.reason);
   } catch (err) {
     setStatus(err.message, true);
     cleanup();

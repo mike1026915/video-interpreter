@@ -14,7 +14,11 @@ let beamsOk = true;             // beam search 失敗一次就退回貪婪解碼
 let langOk = true;              // 模型不接受 language / task 參數時（例如單語模型）就不再傳
 
 let asr = null;
-let loadedKey = null;
+let loadedModel = null;
+let loadedInfo = null;
+
+const errMsg = (err) => String((err && err.message) || err);
+const status = (text) => self.postMessage({ type: 'status', text });
 
 async function hasWebGPU() {
   try {
@@ -40,56 +44,67 @@ function dtypeCandidates(model, gpu) {
   return list.filter((d) => !seen.has(JSON.stringify(d)) && seen.add(JSON.stringify(d)));
 }
 
-async function load(model) {
-  const gpu = await hasWebGPU();
-  const key = model + (gpu ? '@webgpu' : '@wasm');
-  if (asr && loadedKey === key) return { device: gpu ? 'webgpu' : 'wasm' };
-  if (asr) { try { await asr.dispose(); } catch {} asr = null; }
-
-  const opts = {
-    device: gpu ? 'webgpu' : 'wasm',
-    progress_callback: (p) => {
-      if (p.status === 'progress' && p.total) {
-        self.postMessage({ type: 'progress', file: p.file, loaded: p.loaded, total: p.total });
-      }
-    },
-  };
-  if (!gpu) {
-    // 只有跨來源隔離（manifest 的 COOP/COEP）生效時才有 SharedArrayBuffer，才能開多執行緒
-    env.backends.onnx.wasm.numThreads = self.crossOriginIsolated
-      ? Math.max(1, Math.min(4, Math.floor((self.navigator.hardwareConcurrency || 2) / 2)))
-      : 1;
-  }
-
-  let usedDtype = null, lastErr = null;
-  for (const dtype of dtypeCandidates(model, gpu)) {
-    try {
-      asr = await pipeline('automatic-speech-recognition', model, { ...opts, dtype });
-      usedDtype = dtype;
-      break;
-    } catch (err) {
-      lastErr = err;
-      const msg = String((err && err.message) || err);
-      console.warn('[asr] 載入失敗，換下一組量化設定', dtype, err);
-      self.postMessage({ type: 'status', text: `量化設定 ${JSON.stringify(dtype)} 載入失敗，嘗試其他設定…（${msg.slice(0, 120)}）` });
-    }
-  }
-  if (!asr) throw new Error(`模型 ${model} 載入失敗：${String((lastErr && lastErr.message) || lastErr)}`);
-
-  // 預熱：第一次推論要編譯 shader / 初始化，先用靜音跑一次，免得第一段特別慢
-  const t0 = performance.now();
+// 載入成功不代表能跑：例如 WebGPU 可能在推論時才發現某個運算不支援
+// （"[WebGPU] Kernel ... Mask not supported"）。所以用 1 秒靜音實際跑一次，順便預熱。
+async function validate() {
   try {
     await asr(new Float32Array(16000), { language: 'english', task: 'transcribe' });
   } catch (err) {
-    console.warn('[asr] 預熱失敗（不影響使用）', err);
+    if (!/language|task/i.test(errMsg(err))) throw err;
+    await asr(new Float32Array(16000)); // 模型不接受 language / task：不帶參數再試一次
   }
-  console.log(`[asr] 模型 ${model} 裝置 ${opts.device} 量化 ${JSON.stringify(usedDtype)} 執行緒 ${env.backends.onnx.wasm.numThreads} 預熱 ${Math.round(performance.now() - t0)}ms`);
-
-  loadedKey = key;
-  return { device: opts.device };
 }
 
-const errMsg = (err) => String((err && err.message) || err);
+async function load(model) {
+  if (asr && loadedModel === model) return loadedInfo;
+  if (asr) { try { await asr.dispose(); } catch {} asr = null; loadedModel = null; }
+
+  const gpu = await hasWebGPU();
+  const attempts = [
+    ...(gpu ? dtypeCandidates(model, true).map((dtype) => ({ device: 'webgpu', dtype })) : []),
+    ...dtypeCandidates(model, false).map((dtype) => ({ device: 'wasm', dtype })),
+  ];
+  const progress_callback = (p) => {
+    if (p.status === 'progress' && p.total) {
+      self.postMessage({ type: 'progress', file: p.file, loaded: p.loaded, total: p.total });
+    }
+  };
+
+  let lastErr = null, gpuErr = null, skipGpu = false;
+  for (const { device, dtype } of attempts) {
+    if (device === 'webgpu' && skipGpu) continue;
+    if (device === 'wasm') {
+      if (gpu && gpuErr) status(`WebGPU 無法執行這個模型，改用 CPU（會慢很多）…（${errMsg(gpuErr).slice(0, 120)}）`);
+      // 只有跨來源隔離（manifest 的 COOP/COEP）生效時才有 SharedArrayBuffer，才能開多執行緒
+      env.backends.onnx.wasm.numThreads = self.crossOriginIsolated
+        ? Math.max(1, Math.min(4, Math.floor((self.navigator.hardwareConcurrency || 2) / 2)))
+        : 1;
+    }
+    const label = `${device} ${JSON.stringify(dtype)}`;
+    try {
+      asr = await pipeline('automatic-speech-recognition', model, { device, dtype, progress_callback });
+      status(`驗證模型能否執行（${label}）…`);
+      const t0 = performance.now();
+      await validate();
+      console.log(`[asr] 模型 ${model} 使用 ${label} 執行緒 ${env.backends.onnx.wasm.numThreads} 驗證＋預熱 ${Math.round(performance.now() - t0)}ms`);
+      loadedModel = model;
+      loadedInfo = { device, fellBack: gpu && device === 'wasm', reason: gpuErr ? errMsg(gpuErr).slice(0, 160) : '' };
+      return loadedInfo;
+    } catch (err) {
+      lastErr = err;
+      if (device === 'webgpu') {
+        gpuErr = err;
+        // WebGPU 執行階段的錯誤（某個運算不支援）跟量化無關，換量化也一樣會壞，
+        // 而且每換一組就要重新下載一套模型檔，所以直接改用 CPU。
+        if (/\[WebGPU\]|Kernel/i.test(errMsg(err))) skipGpu = true;
+      }
+      console.warn(`[asr] ${label} 失敗，換下一組設定`, err);
+      status(`${label} 無法使用，嘗試其他設定…（${errMsg(err).slice(0, 120)}）`);
+      if (asr) { try { await asr.dispose(); } catch {} asr = null; }
+    }
+  }
+  throw new Error(`模型 ${model} 無法載入或執行：${errMsg(lastErr)}`);
+}
 
 async function decode(audio, language) {
   const opts = { chunk_length_s: 30, max_new_tokens: MAX_NEW_TOKENS };
@@ -121,7 +136,8 @@ self.onmessage = async (e) => {
   const m = e.data;
   try {
     if (m.type === 'load') {
-      langOk = true; // 換模型時重新嘗試
+      langOk = true;  // 換模型時重新嘗試
+      beamsOk = true;
       const info = await load(m.model);
       self.postMessage({ type: 'loaded', ...info });
     } else if (m.type === 'transcribe') {
