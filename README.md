@@ -26,6 +26,15 @@
 | base | 沒有 GPU，或速度跟不上時 |
 | small | 預設，一般建議 |
 | large-v3-turbo | 有 WebGPU 的顯卡時最準；下載量較大 |
+| 自訂 | 輸入任何 Hugging Face 上、有 ONNX 版本的 Whisper 模型 ID，見下 |
+
+### 自訂模型
+選「自訂」後會出現輸入欄，填 `作者/模型名`（貼整個 huggingface.co 網址也可以），設定會被記住。
+例如日文微調版：`willopcbeta/whisper-ja-760M-ONNX`（社群轉換，**未驗證過品質與相容性**）。
+- 模型必須有 ONNX 權重，才能被 Transformers.js 載入；沒有的話會顯示載入失敗的錯誤。
+- 自訂模型的檔案命名不一定和內建模型相同，所以載入時會依序嘗試幾組量化設定（例如 encoder fp16 / decoder q4、fp16、q8），失敗的設定會顯示在狀態列，console 有完整錯誤。為避免悄悄下載好幾 GB，不會嘗試純 fp32。
+- 如果模型不接受 `language` / `task` 參數（例如單語模型），會自動改成不傳。
+- 第一次載入要下載模型，之後走瀏覽器快取。
 
 ### 即時 / 精準
 側欄的「翻譯方式」可以隨時切換（設定會記住）：
@@ -64,7 +73,13 @@
 - **「被當成幻覺濾掉」**：辨識出的文字符合 `HALLUCINATIONS` 的規則（例如「Thank you」、被括號包住的內容）。如果濾掉的其實是正常內容，就該調整那份規則。
 - **「有聲音的部分只有 x 秒，太短」**：低於 `MIN_VOICED_S`（0.3 秒）。
 - **「辨識錯誤」**：worker 回報的錯誤。
-- **完全沒有任何提示**：代表這段音量一直低於 `SILENCE_RMS`，被當成靜音，連段落都沒開始。這時要調低 `SILENCE_RMS`，或改用自適應門檻。
+- **完全沒有任何提示**：代表這段音量一直低於靜音門檻，被當成靜音，連段落都沒開始。門檻現在是自適應的（見下），console 的 `[vad]` 會每 20 秒印一次目前估計的底噪與門檻，可以用來判斷。
+
+### 自適應靜音門檻
+收音小聲、底噪大、有背景音樂的音檔，固定門檻會把人聲當成靜音（漏句），或把底噪當成人聲（切不出停頓）。所以門檻會隨底噪調整：
+- 往回看最近 10 秒，取最安靜的 10% 音框當底噪，門檻 = 底噪 × 2，限制在 0.003～0.03 之間。
+- 開頭約 1 秒還沒估出底噪時，使用預設的 `SILENCE_RMS`（0.008）。
+- 限制：人聲和底噪音量差不多時，任何門檻都分不開；連續講話完全沒有空隙時，底噪會被高估。
 
 ## 注意事項
 - 換到別的分頁要用時，要在那個分頁再點一次圖示（Chrome 的權限限制）。
@@ -77,7 +92,7 @@
 
 ## 可調參數
 `sidepanel.js` 最上面：
-- 切段：`MIN_SEG_S`、`MAX_SEG_S`、`END_SILENCE_S`，以及超過 `LONG_SEG_S` 後改用的 `LONG_END_SILENCE_S`、靜音門檻 `SILENCE_RMS`。
+- 切段：`MIN_SEG_S`、`MAX_SEG_S`、`END_SILENCE_S`，以及超過 `LONG_SEG_S` 後改用的 `LONG_END_SILENCE_S`、開頭的預設門檻 `SILENCE_RMS`，以及自適應門檻的 `NOISE_WINDOW_FRAMES`、`NOISE_PERCENTILE`、`NOISE_MULT`、`MIN_THRESHOLD`、`MAX_THRESHOLD`。
 - 快語速 / 模糊音訊：`CUT_SEARCH_FROM_S`（上限時從第幾秒之後找低點）、`PRE_ROLL_FRAMES`（開頭留白）、`TARGET_RMS`、`MAX_GAIN`（音量正規化）。
 - 整句合併（在「句子合併」區塊）：`MAX_GROUP_CHARS`、`MAX_GROUP_SEGS`、`GROUP_QUIET_S`、`GROUP_MAX_WAIT_MS`。
 

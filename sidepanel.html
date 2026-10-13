@@ -25,6 +25,7 @@
           <option value="onnx-community/whisper-base">base（快，約 150MB）</option>
           <option value="onnx-community/whisper-small" selected>small（建議，約 300MB）</option>
           <option value="onnx-community/whisper-large-v3-turbo">large-v3-turbo（最準，需好顯卡）</option>
+          <option value="custom">自訂（輸入 Hugging Face 模型 ID）…</option>
         </select>
       </label>
       <label>翻譯方式
@@ -32,6 +33,12 @@
           <option value="accurate" selected>精準（等句尾整句翻）</option>
           <option value="live">即時（每段立刻翻）</option>
         </select>
+      </label>
+    </div>
+    <div class="row" id="customRow" hidden>
+      <label>自訂模型 ID（需要有 ONNX 版本，可被 Transformers.js 載入）
+        <input id="customModel" type="text" spellcheck="false" autocomplete="off"
+               placeholder="例如 willopcbeta/whisper-ja-760M-ONNX">
       </label>
     </div>
     <div class="row">
