@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "影片口譯側欄",
+  "version": "0.1.0",
+  "description": "擷取分頁影片聲音，在本機用 Whisper 辨識，再用 Chrome 內建翻譯轉成繁體中文，顯示在側邊欄。完全免費、不需 API 金鑰。",
+  "minimum_chrome_version": "138",
+  "permissions": ["tabCapture", "sidePanel", "activeTab", "storage"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "開啟影片口譯側欄" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}
