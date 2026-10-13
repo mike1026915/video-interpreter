@@ -3,7 +3,7 @@
 回覆請用台灣繁體中文。
 
 ## 這是什麼
-Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機 Whisper（transformers.js）辨識 → Chrome 內建 Translator API 翻成繁體中文（zh-Hant）→ 一段段顯示在側邊欄。
+Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機語音辨識（Whisper / Cohere Transcribe 走 transformers.js；Qwen3-ASR 走 onnxruntime-web）→ 翻成繁體中文（Chrome 內建 Translator API，或本機 HY-MT1.5）→ 一段段顯示在側邊欄。
 需求是「免費、不用太即時、不用疊字幕」，所以全部在本機跑，沒有任何雲端 API。主要用途是看日文影片。
 
 ## 架構
@@ -14,13 +14,22 @@ Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機 Whisper�
   - `capture-worklet.js`（AudioWorklet）把音訊混成單聲道、每 4096 樣本送回主執行緒。
   - `makeSegmenter`：降取樣到 16kHz，用 100ms 音框的 RMS 判斷停頓切段（3～15 秒）。參數在檔案開頭。
   - 段落排進 queue，依序送 worker 辨識 → 過濾 Whisper 幻覺句 → 翻譯。
+  - 自動偵測語言時，Qwen3-ASR 會把自己判斷的語言（ISO 代碼）跟著結果回傳，翻譯就直接用，不再跑 LanguageDetector。
+  - 依模型選 worker：模型 ID 含 `qwen3-asr` → `qwen3-asr-worker.js`，其他 → `asr-worker.js`。送給 worker 的語言是 ISO 代碼（`ja`），自動偵測時為 null。
+  - 沒選過模型時：有 WebGPU 預設 large-v3-turbo，沒有就 small。
+  - 翻譯引擎選 HY-MT1.5 時另開 `mt-worker.js`，帶前 2 句原文當上下文；載入失敗就改用 Chrome 內建翻譯。
   - Translator / LanguageDetector 下載模型需要使用者手勢，所以在「開始」按鈕的 click 裡先觸發；自動偵測語言時若需要下載，會顯示一個按鈕讓使用者點。
-- `asr-worker.js`：module worker，跑 transformers.js 的 `automatic-speech-recognition` pipeline。有 WebGPU 用 webgpu（encoder fp32/fp16、decoder q4），沒有就退回 wasm q8。模型從 Hugging Face 下載後由瀏覽器快取。
-- `lib/`：transformers.js 3.8.1 的 `transformers.min.js` 和 ONNX Runtime 的 `ort-wasm-simd-threaded.jsep.{mjs,wasm}`。MV3 不能載入遠端程式碼，所以 `env.backends.onnx.wasm.wasmPaths` 指向本地 `lib/`。CSP 有 `'wasm-unsafe-eval'`。
+- `asr-worker.js`：module worker，跑 transformers.js 的 `automatic-speech-recognition` pipeline（Whisper、Cohere Transcribe）。有 WebGPU 用 webgpu，依顯示卡有沒有 `shader-f16` 選檔案（turbo：fp16 或 q4 encoder + q4 decoder；Cohere：q4f16 或 q4），沒有 WebGPU 時 Whisper 退回 wasm q8，Cohere 直接報錯。模型從 Hugging Face 下載後由瀏覽器快取。
+- `qwen3-asr-worker.js` + `qwen3-asr-core.js`：Qwen3-ASR（`jiangzhuo9357/Qwen3-ASR-1.7B-ONNX`，layout v2，介面寫在模型卡和 `prompt_config.json`）。transformers.js 不支援，所以自己做 log-mel、prompt、嵌入（int8 表 × scale）、encoder → decoder_init → decoder_step 貪婪解碼、byte-level BPE 解碼。KV cache 用 `preferredOutputLocation: 'gpu-buffer'` 留在 GPU。只支援 WebGPU。模型檔自己下載、存在 Cache Storage `qwen3-asr-models`。
+- `mt-worker.js`：HY-MT1.5-1.8B（`onnx-community/HY-MT1.5-1.8B-ONNX`），transformers.js text-generation，只支援 WebGPU。提示詞用模型卡的中文模板（目標「繁体中文」）。
+- `lib/`：transformers.js 4.3.1 的 `transformers.min.js`（內含 onnxruntime-web）、onnxruntime-web 1.31.0-dev 的 `ort.webgpu.min.mjs`（給 Qwen3-ASR），兩者共用 `ort-wasm-simd-threaded.asyncify.{mjs,wasm}`（同一版 ORT）。transformers.js 4.x 預設會去 CDN 抓 wasm，MV3 不能載入遠端程式碼，所以每個 worker 都把 `wasmPaths` 設成指向本地 `lib/` 的 `{ mjs, wasm }`。CSP 有 `'wasm-unsafe-eval'`。升級時兩個套件的 ORT 版本要一致；wasm 檔名只寫在 `shared.js` 的 `ORT_WASM_PATHS`。`transformers.min.js` 有一處手動修改：`"Mistral3ForConditionalGeneration"` 拆成 `"Mistral3For"+"ConditionalGeneration"`（旁邊有註解），因為 GitHub 密鑰掃描會把原字串誤判成 Mistral API Key 而擋下 push；升級時要再改一次。
+- `shared.js`：側欄和 worker 共用的 `ORT_WASM_PATHS`、`gpuInfo()`（WebGPU 與 shader-f16 偵測）、`isQwen3Asr` / `isCohere`。
+- `tests/`：`node --test tests/*.test.mjs`。Qwen3-ASR 核心邏輯的單元測試，加上用假 ONNX 模型（`tests/fixtures/mock-qwen3/`，介面同真模型）在 Node 的 ORT wasm 上跑完整解碼迴圈。
 
 ## 狀態
 - 切段邏輯用合成音訊在 Node 測過。
-- **整體還沒在真實 Chrome 上跑過**，第一步應該是載入測試、看 side panel 的 DevTools console。
+- Qwen3-ASR worker 用假模型在 headless Chromium（SwiftShader WebGPU、q4 路徑）跑通過；**真模型沒在這個開發環境跑過**（連不到 huggingface.co），q4f16 路徑只在 Node 用假模型測過。
+- Cohere Transcribe、HY-MT1.5、transformers.js 4.3.1 下的 Whisper：確認能在擴充功能 CSP 下載入、走到下載模型那一步，真模型未實測。
 
 ## 已知風險 / 可能要先處理的
 - 側欄按鈕呼叫 `getMediaStreamId` 是否被視為已 invoke（依賴前一次點圖示的 activeTab）——若失敗，改成在 `action.onClicked` 裡取 streamId，或改用 offscreen document 架構。
@@ -28,8 +37,9 @@ Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機 Whisper�
 - Whisper 對日文的斷句與幻覺；切段參數可能要依實際影片調整。
 
 ## 可能的改進方向
-- 把前後段原文一起送翻譯以保留上下文（日文主詞省略常翻錯）。
-- 翻譯品質不足時，可考慮用 Chrome 的 Prompt API（Gemini Nano）做帶上下文的翻譯。
+- Qwen3-ASR 的日文微調版（neosophie/Qwen3-ASR-1.7B-JA、jaykwok 的 Galgame 版）沒有現成的 layout v2 ONNX，要自己用 Sokuji 公開的匯出流程轉。
+- Chrome 的 Prompt API（Gemini Nano）文件列的輸出語言沒有中文，不適合拿來翻繁中。
+- 只有 CPU 的電腦：可試 Moonshine 日文版（`wmoto-ai/moonshine-tiny-ja-ONNX`）或 Chrome 內建離線語音辨識（Web Speech API 的 `processLocally` + `start(audioTrack)`）。
 - 顯示影片實際播放時間（content script 讀 `video.currentTime`）取代從開始計時。
 - 逐字稿存到 chrome.storage，關掉側欄不會消失。
 

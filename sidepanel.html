@@ -22,10 +22,18 @@
       </label>
       <label>辨識模型
         <select id="model">
-          <option value="onnx-community/whisper-base">base（快，約 150MB）</option>
-          <option value="onnx-community/whisper-small" selected>small（建議，約 300MB）</option>
-          <option value="onnx-community/whisper-large-v3-turbo">large-v3-turbo（最準，需好顯卡）</option>
+          <option value="onnx-community/whisper-base">Whisper base（快，約 150MB）</option>
+          <option value="onnx-community/whisper-small" selected>Whisper small（沒有 GPU 時建議，約 300MB）</option>
+          <option value="onnx-community/whisper-large-v3-turbo">Whisper large-v3-turbo（有 GPU 時建議，約 0.8–1.6GB）</option>
+          <option value="jiangzhuo9357/Qwen3-ASR-1.7B-ONNX">Qwen3-ASR 1.7B（日文最準，需 WebGPU，約 2–2.7GB）</option>
+          <option value="onnx-community/cohere-transcribe-03-2026-ONNX">Cohere Transcribe（實驗，需 WebGPU，約 1.5–2.1GB）</option>
           <option value="custom">自訂（輸入 Hugging Face 模型 ID）…</option>
+        </select>
+      </label>
+      <label>翻譯引擎
+        <select id="engine">
+          <option value="chrome" selected>Chrome 內建（快，一次一句）</option>
+          <option value="hymt">HY-MT1.5 本機模型（參考前文，需 WebGPU，約 1.2–1.4GB）</option>
         </select>
       </label>
       <label>翻譯方式
@@ -36,7 +44,7 @@
       </label>
     </div>
     <div class="row" id="customRow" hidden>
-      <label>自訂模型 ID（需要有 ONNX 版本，可被 Transformers.js 載入）
+      <label>自訂模型 ID（Transformers.js 能載入的 ONNX 版 Whisper，或 Qwen3-ASR layout v2 的 ONNX）
         <input id="customModel" type="text" spellcheck="false" autocomplete="off"
                placeholder="例如 willopcbeta/whisper-ja-760M-ONNX">
       </label>

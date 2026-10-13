@@ -1,3 +1,5 @@
+import { isQwen3Asr, isCohere, gpuInfo } from './shared.js';
+
 // ===== 設定 =====
 const TARGET = 'zh-Hant';
 const SR = 16000;               // Whisper 需要 16kHz
@@ -23,10 +25,9 @@ const LONG_END_SILENCE_S = 0.35;
 const MIN_VOICED_S = 0.3;       // 有聲音的部分不到 0.3 秒就丟掉（避免 Whisper 對靜音亂講；太高會吃掉「はい」這類短回應）
 const MIN_NOTE_VOICED_S = 0.15; // 被丟掉的段落若有聲音部分超過這個長度，就在畫面上留一行提示
 
-const WHISPER_LANG = {
-  en: 'english', ja: 'japanese', ko: 'korean', fr: 'french',
-  de: 'german', es: 'spanish', zh: 'chinese',
-};
+const TURBO = 'onnx-community/whisper-large-v3-turbo';
+const SMALL = 'onnx-community/whisper-small';
+const MT_CONTEXT_SENTENCES = 2; // HY-MT1.5 翻譯時，帶上前面幾句原文當上下文
 
 // 靜音或音樂時 Whisper 常見的幻覺句
 const HALLUCINATIONS = [
@@ -38,7 +39,7 @@ const HALLUCINATIONS = [
 const $ = (id) => document.getElementById(id);
 const els = {
   srcLang: $('srcLang'), model: $('model'), customModel: $('customModel'), customRow: $('customRow'),
-  mode: $('mode'), start: $('startBtn'), stop: $('stopBtn'),
+  mode: $('mode'), engine: $('engine'), start: $('startBtn'), stop: $('stopBtn'),
   exp: $('exportBtn'), clear: $('clearBtn'), status: $('status'), progress: $('progress'),
   dl: $('dlTranslatorBtn'), list: $('list'),
 };
@@ -51,15 +52,24 @@ function setStatus(text, isErr = false) {
 // ===== 設定記憶 =====
 function showCustomRow() { els.customRow.hidden = els.model.value !== 'custom'; }
 
-chrome.storage.local.get(['srcLang', 'model', 'customModel', 'mode']).then((s) => {
+let modelPicked = false;          // 使用者在這次開側欄後自己選過模型：不要再套用預設值
+chrome.storage.local.get(['srcLang', 'model', 'customModel', 'mode', 'engine']).then(async (s) => {
   if (s.srcLang) els.srcLang.value = s.srcLang;
-  if (s.model) els.model.value = s.model;
   if (s.customModel) els.customModel.value = s.customModel;
   if (s.mode) els.mode.value = s.mode;
+  if (s.engine) els.engine.value = s.engine;
+  if (s.model) els.model.value = s.model;
+  else {
+    const def = (await gpuInfo()).ok ? TURBO : SMALL; // 沒選過模型：有 WebGPU 用 turbo，日文準很多
+    if (!modelPicked) els.model.value = def;
+  }
   showCustomRow();
 });
 els.srcLang.onchange = () => chrome.storage.local.set({ srcLang: els.srcLang.value });
+els.engine.onchange = () => chrome.storage.local.set({ engine: els.engine.value });
+
 els.model.onchange = () => {
+  modelPicked = true;
   chrome.storage.local.set({ model: els.model.value });
   showCustomRow();
 };
@@ -80,7 +90,7 @@ els.mode.onchange = () => {
   if (els.mode.value === 'live') flushGroup();
 };
 
-// ===== Whisper worker =====
+// ===== 辨識 worker（Whisper / Cohere：asr-worker.js；Qwen3-ASR：qwen3-asr-worker.js）=====
 let worker = null;
 let workerReady = null;
 const pendingAsr = new Map();
@@ -91,26 +101,38 @@ const gpuBroken = new Map();
 let workerModel = null;         // 目前這個 worker 載入（或正在載入）的模型
 let workerDirty = false;        // 這個 worker 出過錯（WebGPU 失敗後可能整個壞掉），下次載入要換新的
 
-function spawnWorker() {
+function spawnWorker(model) {
   worker?.terminate();
   // 舊 worker 裡還沒回來的辨識結果不會再回來了，先讓它們失敗，免得佇列卡住
   for (const p of pendingAsr.values()) p.reject(new Error('辨識 worker 已重新啟動'));
   pendingAsr.clear();
-  worker = new Worker('asr-worker.js', { type: 'module' });
+  worker = new Worker(isQwen3Asr(model) ? 'qwen3-asr-worker.js' : 'asr-worker.js', { type: 'module' });
   worker.onmessage = onWorkerMessage;
+  // worker 崩潰（例如顯示記憶體不足）或程式載入失敗時不會有任何訊息：讓等待中的載入和辨識失敗，不要卡住
+  worker.onerror = (e) => {
+    const err = new Error(`辨識 worker 異常結束${e.message ? `：${e.message}` : '（可能是記憶體不足）'}`);
+    workerDirty = true;
+    if (workerReady && !workerReady.done) workerReady.reject(err);
+    for (const p of pendingAsr.values()) p.reject(err);
+    pendingAsr.clear();
+  };
   workerDirty = false;
 }
-spawnWorker();
+
+// 下載進度：所有檔案加總顯示
+function showProgress(key, loaded, total, what) {
+  fileProgress.set(key, [loaded, total]);
+  let l = 0, t = 0;
+  for (const [a, b] of fileProgress.values()) { l += a; t += b; }
+  els.progress.hidden = false;
+  els.progress.firstElementChild.style.width = `${(l / t) * 100}%`;
+  setStatus(`下載${what}模型中… ${(l / 1e6).toFixed(0)} / ${(t / 1e6).toFixed(0)} MB（只有第一次需要）`);
+}
 
 function onWorkerMessage(e) {
   const m = e.data;
   if (m.type === 'progress') {
-    fileProgress.set(m.file, [m.loaded, m.total]);
-    let l = 0, t = 0;
-    for (const [a, b] of fileProgress.values()) { l += a; t += b; }
-    els.progress.hidden = false;
-    els.progress.firstElementChild.style.width = `${(l / t) * 100}%`;
-    setStatus(`下載辨識模型中… ${(l / 1e6).toFixed(0)} / ${(t / 1e6).toFixed(0)} MB（只有第一次需要）`);
+    showProgress(m.file, m.loaded, m.total, '辨識');
   } else if (m.type === 'status') {
     setStatus(m.text);
   } else if (m.type === 'restart') {
@@ -118,7 +140,7 @@ function onWorkerMessage(e) {
     // 所以整個 worker 關掉，開一個全新的只用 CPU 載入。
     gpuBroken.set(m.model, m.reason);
     setStatus(`WebGPU 無法執行這個模型，重新啟動並改用 CPU…（${m.reason.slice(0, 120)}）`, true);
-    spawnWorker();
+    spawnWorker(m.model);
     fileProgress.clear();
     worker.postMessage({ type: 'load', model: m.model, forceWasm: true, reason: m.reason });
   } else if (m.type === 'loaded') {
@@ -134,7 +156,7 @@ function onWorkerMessage(e) {
     const p = pendingAsr.get(m.id);
     pendingAsr.delete(m.id);
     if (!p) return;
-    m.type === 'result' ? p.resolve(m.text) : p.reject(new Error(m.message));
+    m.type === 'result' ? p.resolve({ text: m.text, lang: m.lang || null }) : p.reject(new Error(m.message));
   }
 }
 
@@ -142,7 +164,7 @@ function loadModel(model) {
   // 換模型、上次載入失敗、或辨識時出過 WebGPU 錯誤：都換一個全新的 worker，
   // 不要在可能已經壞掉的 ONNX Runtime 上繼續載入（那樣會一直失敗、一直重新下載）。
   // 模型檔有瀏覽器快取，換 worker 不會重新下載。
-  if (workerDirty || (workerModel && workerModel !== model)) spawnWorker();
+  if (!worker || workerDirty || workerModel !== model) spawnWorker(model);
   workerModel = model;
   fileProgress.clear();
   let resolve, reject;
@@ -159,13 +181,75 @@ function loadModel(model) {
 }
 
 let asrSeq = 0;
-function transcribe(audio, language) {
+// lang：ISO 代碼（ja、en…），自動偵測時為 null
+function transcribe(audio, lang) {
   const id = ++asrSeq;
   return new Promise((resolve, reject) => {
     pendingAsr.set(id, { resolve, reject });
-    worker.postMessage({ type: 'transcribe', id, audio, language }, [audio.buffer]);
+    worker.postMessage({ type: 'transcribe', id, audio, lang }, [audio.buffer]);
   });
 }
+
+// ===== HY-MT1.5 翻譯 worker =====
+let mtWorker = null;
+let mtReady = null;               // 載入中 / 已載入的 Promise
+let mtFailed = false;             // 這次口譯載入失敗，改用 Chrome 內建翻譯
+const pendingMt = new Map();
+let mtSeq = 0;
+const mtContext = [];             // 最近幾句原文，翻譯時當上下文
+
+function loadMt() {
+  if (mtReady) return mtReady;
+  mtWorker = new Worker('mt-worker.js', { type: 'module' });
+  let rejectLoad;
+  mtReady = new Promise((resolve, reject) => {
+    rejectLoad = reject;
+    mtWorker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'progress') {
+        showProgress(`mt:${m.file}`, m.loaded, m.total, '翻譯');
+      } else if (m.type === 'status') {
+        setStatus(m.text);
+      } else if (m.type === 'loaded') {
+        els.progress.hidden = true;
+        resolve();
+      } else if (m.type === 'result' || m.type === 'error') {
+        const p = pendingMt.get(m.id);
+        pendingMt.delete(m.id);
+        if (p) m.type === 'result' ? p.resolve(m.text) : p.reject(new Error(m.message));
+        else if (m.type === 'error') reject(new Error(m.message));
+      }
+    };
+  });
+  mtWorker.onerror = (e) => {
+    const err = new Error(`翻譯 worker 異常結束${e.message ? `：${e.message}` : '（可能是記憶體不足）'}`);
+    rejectLoad(err);
+    for (const p of pendingMt.values()) p.reject(err);
+    pendingMt.clear();
+    unloadMt();
+    mtFailed = true; // 之後的句子改用 Chrome 內建翻譯
+  };
+  mtWorker.postMessage({ type: 'load' });
+  mtReady.catch(() => unloadMt());
+  return mtReady;
+}
+
+// 不用 HY-MT1.5 時把 worker 關掉，釋放約 1.5GB 的顯示記憶體給辨識模型
+function unloadMt() {
+  mtWorker?.terminate();
+  mtWorker = null;
+  mtReady = null;
+}
+
+function mtTranslate(text, context) {
+  const id = ++mtSeq;
+  return new Promise((resolve, reject) => {
+    pendingMt.set(id, { resolve, reject });
+    mtWorker.postMessage({ type: 'translate', id, text, context });
+  });
+}
+
+const useMt = () => els.engine.value === 'hymt' && !mtFailed && !!mtWorker;
 
 // ===== Chrome 內建翻譯 / 語言偵測 =====
 const translators = new Map();    // src -> Promise<Translator>
@@ -233,7 +317,14 @@ async function translateUnit(unit, src, tr) {
   }
   const t = performance.now();
   try {
-    last.setZh(await tr.translate(unit.text));
+    if (tr) {
+      last.setZh(await tr.translate(unit.text));
+    } else {
+      const context = mtContext.join('\n');
+      mtContext.push(unit.text);
+      if (mtContext.length > MT_CONTEXT_SENTENCES) mtContext.shift();
+      last.setZh(await mtTranslate(unit.text, context));
+    }
   } catch (err) {
     last.setZh(`（翻譯失敗：${err.message}）`);
   }
@@ -366,9 +457,11 @@ async function flushGroup() {
   const texts = entries.map((e) => e.text);
   const unit = { entries, last, text: texts.join(CJK.test(texts[0]) ? '' : ' ') };
   try {
-    const src = srcSetting === 'auto' ? await detectLang(unit.text) : srcSetting;
-    if (!src) { last.setZh('（無法判斷語言）'); return; }
+    // 自動偵測：辨識模型已經判斷出語言就直接用，不然才用 Chrome 的 LanguageDetector
+    const src = srcSetting !== 'auto' ? srcSetting : (last.lang || await detectLang(unit.text));
     if (src === 'zh') return translateUnit(unit, src, null);
+    if (useMt()) return translateUnit(unit, src, null); // HY-MT 是多語模型，不需要知道原文語言
+    if (!src) { last.setZh('（無法判斷語言）'); return; }
 
     const tr = await getTranslator(src, false);
     if (tr) return translateUnit(unit, src, tr);
@@ -395,7 +488,7 @@ function enqueueSegment(audio, t0, srcSetting) {
   queue = queue.then(async () => {
     try {
       const tStart = performance.now();
-      const text = await transcribe(audio, WHISPER_LANG[srcSetting] || null);
+      const { text, lang } = await transcribe(audio, srcSetting === 'auto' ? null : srcSetting);
       const asrMs = Math.round(performance.now() - tStart);
       if (!text) {
         addSkipNote(t0, `略過：辨識結果為空（音訊 ${audioS.toFixed(1)}s，可能太小聲或只有雜音）`);
@@ -406,6 +499,7 @@ function enqueueSegment(audio, t0, srcSetting) {
         return;
       }
       const entry = addEntry(t0, text, { audioS, waitMs: Math.round(tStart - tEnq), asrMs });
+      entry.lang = lang; // 辨識模型自己判斷的語言（Qwen3-ASR 自動偵測時才有）
       entry.showTiming();
 
       if (srcSetting === 'zh') { entry.setZh(text); return; }
@@ -428,10 +522,16 @@ async function start() {
   const srcSetting = els.srcLang.value;
   let model;
   try { model = getModel(); } catch (err) { setStatus(err.message, true); return; }
+  if (isCohere(model) && srcSetting === 'auto') {
+    setStatus('Cohere Transcribe 不能自動偵測語言，請在「原文語言」選擇影片的語言', true);
+    return;
+  }
+  const engine = els.engine.value;
   els.start.disabled = true;
   setStatus('準備中…');
 
   // 趁這次點擊還有效，先把翻譯 / 語言偵測模型的下載啟動起來
+  // （選 HY-MT1.5 時也準備好 Chrome 內建翻譯，HY-MT1.5 載入失敗時改用）
   try {
     if (srcSetting === 'auto') {
       if ('LanguageDetector' in self) detector = LanguageDetector.create();
@@ -461,6 +561,23 @@ async function start() {
     setStatus('載入辨識模型…');
     const info = await loadModel(model);
 
+    let mtNote = '';
+    mtContext.length = 0; // 不要把上一部影片的句子當成這次的上下文
+    if (engine !== 'hymt' || srcSetting === 'zh') unloadMt();
+    if (engine === 'hymt' && srcSetting !== 'zh') {
+      mtFailed = false;
+      fileProgress.clear();
+      try {
+        await loadMt();
+        mtNote = '翻譯：HY-MT1.5';
+      } catch (err) {
+        mtFailed = true;
+        mtNote = 'HY-MT1.5 載入失敗，改用 Chrome 內建翻譯';
+        console.warn('[mt] 載入失敗', err);
+        setStatus(`${mtNote}（${err.message.slice(0, 120)}）`, true);
+      }
+    }
+
     await ctx.audioWorklet.addModule('capture-worklet.js');
     workletNode = new AudioWorkletNode(ctx, 'capture');
     const mute = ctx.createGain();
@@ -480,9 +597,9 @@ async function start() {
     const deviceNote = info.device === 'webgpu' ? 'GPU 加速'
       : info.fellBack ? 'WebGPU 無法執行這個模型，改用 CPU，會慢很多；建議換回內建模型'
       : '沒有 GPU，使用 CPU，會比較慢';
-    runNote = deviceNote;
-    runNoteIsWarn = !!info.fellBack;
-    setStatus(`口譯中…（${deviceNote}；側欄關閉就會停止）`, runNoteIsWarn);
+    runNote = mtNote ? `${deviceNote}；${mtNote}` : deviceNote;
+    runNoteIsWarn = !!info.fellBack || mtFailed;
+    setStatus(`口譯中…（${runNote}；側欄關閉就會停止）`, runNoteIsWarn);
     if (info.fellBack) console.warn('[asr] WebGPU 失敗原因：', info.reason);
   } catch (err) {
     setStatus(err.message, true);
@@ -630,7 +747,7 @@ function makeSegmenter(inRate, onSegment, onDrop) {
 // ===== 按鈕 =====
 els.start.onclick = start;
 els.stop.onclick = stop;
-els.clear.onclick = () => { transcript.length = 0; resetGroup(); showEmpty(); };
+els.clear.onclick = () => { transcript.length = 0; mtContext.length = 0; resetGroup(); showEmpty(); };
 els.exp.onclick = () => {
   if (!transcript.length) return;
   const text = transcript.map((e) => `[${fmtTime(e.t0)}]\n${e.text}\n${e.zh ? e.zh + '\n' : ''}`).join('\n');
