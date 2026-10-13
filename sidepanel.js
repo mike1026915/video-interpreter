@@ -81,12 +81,21 @@ els.mode.onchange = () => {
 };
 
 // ===== Whisper worker =====
-const worker = new Worker('asr-worker.js', { type: 'module' });
+let worker = null;
 let workerReady = null;
 const pendingAsr = new Map();
 const fileProgress = new Map();
+// WebGPU 跑不動的模型 -> 失敗原因。這些模型直接在新的 worker 裡用 CPU 載入，不再試 WebGPU。
+const gpuBroken = new Map();
 
-worker.onmessage = (e) => {
+function spawnWorker() {
+  worker?.terminate();
+  worker = new Worker('asr-worker.js', { type: 'module' });
+  worker.onmessage = onWorkerMessage;
+}
+spawnWorker();
+
+function onWorkerMessage(e) {
   const m = e.data;
   if (m.type === 'progress') {
     fileProgress.set(m.file, [m.loaded, m.total]);
@@ -97,6 +106,13 @@ worker.onmessage = (e) => {
     setStatus(`下載辨識模型中… ${(l / 1e6).toFixed(0)} / ${(t / 1e6).toFixed(0)} MB（只有第一次需要）`);
   } else if (m.type === 'status') {
     setStatus(m.text);
+  } else if (m.type === 'restart') {
+    // WebGPU 推論失敗後，同一個 worker 裡的 ONNX Runtime 可能已經壞掉，連 CPU 也跑不動。
+    // 所以整個 worker 關掉，開一個全新的只用 CPU 載入。
+    gpuBroken.set(m.model, m.reason);
+    setStatus(`WebGPU 無法執行這個模型，重新啟動並改用 CPU…（${m.reason.slice(0, 120)}）`, true);
+    spawnWorker();
+    worker.postMessage({ type: 'load', model: m.model, forceWasm: true, reason: m.reason });
   } else if (m.type === 'loaded') {
     els.progress.hidden = true;
     workerReady?.resolve(m);
@@ -110,7 +126,7 @@ worker.onmessage = (e) => {
     if (!p) return;
     m.type === 'result' ? p.resolve(m.text) : p.reject(new Error(m.message));
   }
-};
+}
 
 function loadModel(model) {
   fileProgress.clear();
@@ -121,7 +137,8 @@ function loadModel(model) {
     resolve: (v) => { workerReady.done = true; resolve(v); },
     reject: (e) => { workerReady.done = true; reject(e); },
   };
-  worker.postMessage({ type: 'load', model });
+  const reason = gpuBroken.get(model);
+  worker.postMessage({ type: 'load', model, forceWasm: !!reason, reason });
   return promise;
 }
 

@@ -35,6 +35,7 @@
 - 自訂模型的檔案命名不一定和內建模型相同，所以載入時會依序嘗試幾組量化設定（例如 encoder fp16 / decoder q4、fp16、q8），失敗的設定會顯示在狀態列，console 有完整錯誤。為避免悄悄下載好幾 GB，不會嘗試純 fp32。
 - 如果模型不接受 `language` / `task` 參數（例如單語模型），會自動改成不傳。
 - 每組設定載入後會先用 1 秒靜音**實際跑一次**，能跑才算成功。WebGPU 在執行時才發現某個運算不支援的話（例如 `[WebGPU] Kernel "[Attention] Attention_0" failed. Error: Mask not supported`），會直接改用 CPU，不再嘗試其他量化（換量化也一樣會壞，而且每換一組就要重新下載一套模型檔）。狀態列會標示「WebGPU 無法執行這個模型，改用 CPU」。
+- 改用 CPU 時會**關掉原本的辨識 worker、開一個全新的**再載入：WebGPU 推論失敗後，同一個 worker 裡的 ONNX Runtime 可能已經壞掉，連 CPU 也會回報同樣的 WebGPU 錯誤。同一次側欄開著期間，這個模型之後都直接用 CPU，不再試 WebGPU；關掉側欄重開才會重新嘗試。
 - 已知：`willopcbeta/whisper-ja-760M-ONNX` 在 WebGPU 上會出現上面那個 Attention mask 錯誤，只能用 CPU 跑；760M 的模型在 CPU 上很慢，多半跟不上影片，請看「排隊」秒數。
 - 第一次載入要下載模型，之後走瀏覽器快取。
 
