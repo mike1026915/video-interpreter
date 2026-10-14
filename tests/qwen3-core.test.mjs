@@ -5,9 +5,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { collapseRepeats } from '../shared.js';
 import {
   logMel, buildPromptIds, splitGenerated, makeBpeDecoder, f32ToF16Bits, f16BitsToF32, argmax,
-  makeEmbedder, transcribe, stripLanguageTag,
+  makeEmbedder, transcribe, stripLanguageTag, loopCut,
 } from '../qwen3-asr-core.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -55,6 +56,16 @@ test('只去掉完整的語言標記，不吃掉後面的辨識結果', () => {
   assert.equal(stripLanguageTag('language Japanese今日はいい天気です', cfg), '今日はいい天気です');
   assert.equal(stripLanguageTag('language Japanese', cfg), '');
   assert.equal(stripLanguageTag('Language models are useful', cfg), 'Language models are useful');
+});
+
+test('重複迴圈：偵測後保留兩次', () => {
+  assert.equal(loopCut([1, 2, 3, 4]), -1);
+  assert.equal(loopCut([9, 5, 6, 5, 6, 5, 6]), -1);           // 只重複 3 次，還不算迴圈
+  assert.equal(loopCut([9, 5, 6, 5, 6, 5, 6, 5, 6]), 5);       // 9 + (5 6)×2
+  assert.equal(loopCut([7, 7, 7, 7]), 2);
+  assert.equal(collapseRepeats('あ、もう、もう、もう、もう、もう、もう、もう'), 'あ、もう、もう');
+  assert.equal(collapseRepeats('今日はいい天気です'), '今日はいい天気です');
+  assert.equal(collapseRepeats('ははははははは'), 'はは');
 });
 
 test('byte-level BPE 解碼，略過特殊 token', () => {

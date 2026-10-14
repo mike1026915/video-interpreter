@@ -22,7 +22,7 @@ Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機語音辨�
 - `asr-worker.js`：module worker，跑 transformers.js 的 `automatic-speech-recognition` pipeline（Whisper、Cohere Transcribe）。有 WebGPU 用 webgpu，依顯示卡有沒有 `shader-f16` 選檔案（turbo：fp16 或 q4 encoder + q4 decoder；Cohere：q4f16 或 q4），沒有 WebGPU 時 Whisper 退回 wasm q8，Cohere 直接報錯。模型從 Hugging Face 下載後由瀏覽器快取。
 - `qwen3-asr-worker.js` + `qwen3-asr-core.js`：Qwen3-ASR（`jiangzhuo9357/Qwen3-ASR-1.7B-ONNX`，layout v2，介面寫在模型卡和 `prompt_config.json`）。transformers.js 不支援，所以自己做 log-mel、prompt、嵌入（int8 表 × scale）、encoder → decoder_init → decoder_step 貪婪解碼、byte-level BPE 解碼。KV cache 用 `preferredOutputLocation: 'gpu-buffer'` 留在 GPU。只支援 WebGPU。模型檔自己下載、存在 Cache Storage `qwen3-asr-models`。
 - `mt-worker.js`：HY-MT1.5-1.8B（`onnx-community/HY-MT1.5-1.8B-ONNX`），transformers.js text-generation，只支援 WebGPU。提示詞用模型卡的中文模板（目標「繁体中文」）。
-- `lib/`：transformers.js 4.3.1 的 `transformers.min.js`（內含 onnxruntime-web）、onnxruntime-web 1.31.0-dev 的 `ort.webgpu.min.mjs`（給 Qwen3-ASR），兩者共用 `ort-wasm-simd-threaded.asyncify.{mjs,wasm}`（同一版 ORT）。transformers.js 4.x 預設會去 CDN 抓 wasm，MV3 不能載入遠端程式碼，所以每個 worker 都把 `wasmPaths` 設成指向本地 `lib/` 的 `{ mjs, wasm }`。CSP 有 `'wasm-unsafe-eval'`。升級時兩個套件的 ORT 版本要一致；wasm 檔名只寫在 `shared.js` 的 `ORT_WASM_PATHS`。`transformers.min.js` 有一處手動修改：`"Mistral3ForConditionalGeneration"` 拆成 `"Mistral3For"+"ConditionalGeneration"`（旁邊有註解），因為 GitHub 密鑰掃描會把原字串誤判成 Mistral API Key 而擋下 push；升級時要再改一次。
+- `lib/`：transformers.js 4.3.1 的 `transformers.min.js`（內含 onnxruntime-web）、onnxruntime-web 1.31.0-dev 的 `ort.webgpu.min.mjs`（給 Qwen3-ASR），兩者共用 `ort-wasm-simd-threaded.asyncify.{mjs,wasm}`（同一版 ORT）。transformers.js 4.x 預設會去 CDN 抓 wasm，MV3 不能載入遠端程式碼，所以每個 worker 都把 `wasmPaths` 設成指向本地 `lib/` 的 `{ mjs, wasm }`。CSP 有 `'wasm-unsafe-eval'`。transformers.js 的 worker 一定要設 `env.useWasmCache = false`：開著的話它會把 ORT 的 .mjs 轉成 `blob:` 網址再 import，被 CSP 擋掉，錯誤是「no available backend found」（在 Chromium 實測重現過）。升級時兩個套件的 ORT 版本要一致；wasm 檔名只寫在 `shared.js` 的 `ORT_WASM_PATHS`。`transformers.min.js` 有一處手動修改：`"Mistral3ForConditionalGeneration"` 拆成 `"Mistral3For"+"ConditionalGeneration"`（旁邊有註解），因為 GitHub 密鑰掃描會把原字串誤判成 Mistral API Key 而擋下 push；升級時要再改一次。
 - `shared.js`：側欄和 worker 共用的 `ORT_WASM_PATHS`、`gpuInfo()`（WebGPU 與 shader-f16 偵測）、`isQwen3Asr` / `isCohere`。
 - `tests/`：`node --test tests/*.test.mjs`。Qwen3-ASR 核心邏輯的單元測試，加上用假 ONNX 模型（`tests/fixtures/mock-qwen3/`，介面同真模型）在 Node 的 ORT wasm 上跑完整解碼迴圈。
 
@@ -35,6 +35,7 @@ Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機語音辨�
 - 側欄按鈕呼叫 `getMediaStreamId` 是否被視為已 invoke（依賴前一次點圖示的 activeTab）——若失敗，改成在 `action.onClicked` 裡取 streamId，或改用 offscreen document 架構。
 - transformers.js 在 extension worker 裡載入 jsep wasm / WebGPU 是否正常。
 - Whisper 對日文的斷句與幻覺；切段參數可能要依實際影片調整。
+- 量化模型遇到模糊音訊會卡在重複迴圈（例如「もう、もう、…」）：Qwen3-ASR 解碼時偵測到結尾同一段重複 4 次就停（`loopCut`），Whisper 不論 beam 或貪婪都帶 `no_repeat_ngram_size`，側欄再把連續重複 4 次以上的片段收斂成 2 次（`shared.js` 的 `collapseRepeats`）。
 
 ## 可能的改進方向
 - Qwen3-ASR 的日文微調版（neosophie/Qwen3-ASR-1.7B-JA、jaykwok 的 Galgame 版）沒有現成的 layout v2 ONNX，要自己用 Sokuji 公開的匯出流程轉。

@@ -245,6 +245,21 @@ export function makeEmbedder(cfg, table, scales) {
   };
 }
 
+// ===== 重複迴圈偵測 =====
+// 量化模型遇到模糊音訊時，常卡在一小段 token 上一直重複（例如「もう、もう、もう、…」）直到上限。
+// 結尾若是同一段（長度 1～maxPeriod）連續出現 minRepeats 次，回傳去掉多餘重複後應保留的長度；否則回傳 -1。
+export function loopCut(ids, minRepeats = 4, maxPeriod = 12) {
+  for (let p = 1; p <= maxPeriod; p++) {
+    const need = p * minRepeats;
+    if (ids.length < need) break;
+    const end = ids.length;
+    let ok = true;
+    for (let i = end - need; i < end - p && ok; i++) if (ids[i] !== ids[i + p]) ok = false;
+    if (ok) return end - need + p * 2; // 保留兩次（例如「もう、もう、」），比只留一次更接近原話
+  }
+  return -1;
+}
+
 // ===== 整段辨識 =====
 // ort：onnxruntime-web 模組；sessions：{ encoder, init, step }；f16：decoder 是否用 float16 I/O
 // 回傳 { text, language（模型自己判斷的語言名稱，有指定語言時為 null）, tokens }
@@ -289,6 +304,8 @@ export async function transcribe({ ort, sessions, cfg, embedder, decode, filters
       out.logits.dispose?.();
       gen.push(next);
       if (eos.has(next) || gen.length >= limit) break;
+      const cut = loopCut(gen);
+      if (cut >= 0) { gen.length = cut; break; } // 卡在重複迴圈：提早停，也省下後面的解碼時間
       embedder.row(next, row, 0);
       const prev = out;
       out = await sessions.step.run({

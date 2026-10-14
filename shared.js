@@ -12,6 +12,11 @@ export const ORT_WASM_PATHS = {
 export const isQwen3Asr = (model) => /qwen3-asr/i.test(model);       // qwen3-asr-worker.js（onnxruntime-web）
 export const isCohere = (model) => /cohere-transcribe/i.test(model);  // asr-worker.js，只能 WebGPU、要指定語言
 
+// 不管哪個模型，連續重複 4 次以上的片段（1～12 個字）都收斂成 2 次，翻譯也就不會跟著重複
+export function collapseRepeats(text) {
+  return text.replace(/(.{1,12}?)\1{3,}/gu, '$1$1');
+}
+
 // adapter：WebGPU adapter（沒有則為 null）；ok：有 WebGPU；
 // f16：支援 shader-f16（Linux 的 NVIDIA 等 Vulkan 環境常常沒有，fp16 模型會跑不動）
 export async function gpuInfo() {
