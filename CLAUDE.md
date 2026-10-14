@@ -17,6 +17,8 @@ Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機語音辨�
   - 自動偵測語言時，Qwen3-ASR 會把自己判斷的語言（ISO 代碼）跟著結果回傳，翻譯就直接用，不再跑 LanguageDetector。
   - 依模型選 worker：模型 ID 含 `qwen3-asr` → `qwen3-asr-worker.js`，其他 → `asr-worker.js`。送給 worker 的語言是 ISO 代碼（`ja`），自動偵測時為 null。
   - 沒選過模型時：有 WebGPU 預設 large-v3-turbo，沒有就 small。
+  - 時間顯示的是影片時間：切段當下用 `chrome.scripting.executeScript`（靠點圖示時的 activeTab 授權，manifest 有 `scripting`）讀分頁裡正在播放、畫面最大的 `<video>` 的 currentTime，扣掉這段的長度換算成段落開頭（`shared.js` 的 `videoStartFrom`，有算倍速）。讀不到（沒有 video、影片在跨網域 iframe 裡）就退回從開始口譯起算，狀態列會註明。
+  - 前後段之間比較影片時間和擷取時間（`classifyGap`）：影片時間倒退或走得比實際播放多 → 「↪ 影片跳到」（前轉／後轉，同時送出等句尾的原文、清掉 HY-MT 上下文）；連續播放中空了 2 秒以上 → 「⋯ 沒有辨識到聲音」，並附上空白期間最大音量是門檻的幾 %（≥50% 提示可能有小聲說話被當成靜音）。暫停不會讓影片時間前進，所以不會被誤判。
   - 翻譯引擎選 HY-MT1.5 時另開 `mt-worker.js`，帶前 2 句原文當上下文；載入失敗就改用 Chrome 內建翻譯。
   - HY-MT1.5（1.8B）偶爾會把上下文也翻進輸出：`shared.js` 的 `dropEchoedContext` 把跟前 2 句譯文幾乎相同的句子刪掉（bigram Dice ≥ 0.7 或互相包含，4 字以下不刪）。
   - Translator / LanguageDetector 下載模型需要使用者手勢，所以在「開始」按鈕的 click 裡先觸發；自動偵測語言時若需要下載，會顯示一個按鈕讓使用者點。
@@ -42,7 +44,6 @@ Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機語音辨�
 - Qwen3-ASR 的日文微調版（neosophie/Qwen3-ASR-1.7B-JA、jaykwok 的 Galgame 版）沒有現成的 layout v2 ONNX，要自己用 Sokuji 公開的匯出流程轉。
 - Chrome 的 Prompt API（Gemini Nano）文件列的輸出語言沒有中文，不適合拿來翻繁中。
 - 只有 CPU 的電腦：可試 Moonshine 日文版（`wmoto-ai/moonshine-tiny-ja-ONNX`）或 Chrome 內建離線語音辨識（Web Speech API 的 `processLocally` + `start(audioTrack)`）。
-- 顯示影片實際播放時間（content script 讀 `video.currentTime`）取代從開始計時。
 - 逐字稿存到 chrome.storage，關掉側欄不會消失。
 
 ## 開發方式
