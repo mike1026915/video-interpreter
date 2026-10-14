@@ -41,6 +41,10 @@
 - 只能用 WebGPU（CPU 太慢跟不上影片），沒有 WebGPU 會顯示錯誤，請改用 Whisper。
 - 模型檔存在瀏覽器的 Cache Storage（`qwen3-asr-models`），第二次開始不會重新下載。
 - 自訂模型欄也可以填其他同格式（layout v2，有 `prompt_config.json`）的 Qwen3-ASR ONNX，模型 ID 含 `qwen3-asr` 就會用這個 worker。
+- **背景資訊**：辨識時會把「你在『背景資訊』欄填的關鍵字 + 影片分頁標題 + 前 2 段辨識結果」放進 prompt 的 system 訊息（Qwen3-ASR 官方支援的用法），同音詞、人名、作品名比較容易辨識對。欄位只在選 Qwen3-ASR 時出現，內容會記住。
+  - 文字轉 token 用自己寫的 byte-level BPE 編碼（`qwen3-asr-core.js` 的 `makeBpeEncoder`，只用 `vocab.json`），跟 Qwen 官方 tokenizer 逐 token 比對過（`tests/fixtures/qwen-bpe-subset.json`）。
+  - 聽不清楚時模型偶爾會照抄前文：辨識結果有一句（6 字以上）跟前文幾乎一樣，就不帶背景資訊重新辨識一次（console 會印 `[qwen3-asr] 辨識結果照抄前文`）。
+  - 跳轉、按清除、重新開始時會清掉前文。
 
 ### Cohere Transcribe
 - 模型：[`onnx-community/cohere-transcribe-03-2026-ONNX`](https://huggingface.co/onnx-community/cohere-transcribe-03-2026-ONNX)，2B，透過 transformers.js 4.x 的語音辨識 pipeline 執行。
@@ -148,7 +152,9 @@
 
 `asr-worker.js` 最上面：`NUM_BEAMS`、`MAX_NEW_TOKENS`、`NO_REPEAT_NGRAM`；另外 CPU 模式的執行緒數也在這支檔案。
 
-`qwen3-asr-worker.js`：`TOKENS_PER_SECOND`（每秒音訊最多生成幾個 token，限制模型重複迴圈的耗時）。
+`qwen3-asr-worker.js`：`TOKENS_PER_SECOND`（每秒音訊最多生成幾個 token，限制模型重複迴圈的耗時）、`CONTEXT_FIXED_TOKENS` / `CONTEXT_RECENT_TOKENS`（背景資訊的長度上限）。
+
+`sidepanel.js`：`ASR_CONTEXT_SENTENCES`（Qwen3-ASR 帶幾段前文）。
 
 `sidepanel.js`：`MT_CONTEXT_SENTENCES`（HY-MT1.5 帶幾句前文）。
 

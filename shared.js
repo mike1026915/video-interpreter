@@ -68,6 +68,17 @@ export function dropHangul(text, source) {
   return splitSentences(text).filter((s) => !HANGUL.test(s)).join('').trim();
 }
 
+// Qwen3-ASR 帶前文當背景資訊時，聽不清楚的地方偶爾會直接照抄前文。
+// 辨識結果裡有一句（6 個字以上；「ありがとう」這種短句可能真的又說了一次）跟前文的某一句幾乎一樣，就當成照抄（呼叫端會不帶前文重新辨識）
+export function echoesContext(text, recent) {
+  const prev = recent.flatMap(splitSentences).map((s) => s.replace(PUNCT, '')).filter((s) => s.length >= 6);
+  if (!prev.length) return false;
+  return splitSentences(text).some((s) => {
+    const n = s.replace(PUNCT, '');
+    return n.length >= 6 && prev.some((p) => p.includes(n) || n.includes(p) || dice(n, p) >= 0.8);
+  });
+}
+
 // ===== 自動增益（只用在送去辨識的那一路，喇叭聽到的音量不變）=====
 // 很小聲的影片：講話的音量可能比靜音門檻的下限還低，整段被當成靜音。
 // 所以在判斷有沒有人講話之前，先依最近 10 秒的音量把聲音整體拉大。

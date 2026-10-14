@@ -5,10 +5,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { periodicity, collapseRepeats, dropEchoedContext, dropPromptEcho, dropHangul, suspiciousContextOutput, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
+import { echoesContext, periodicity, collapseRepeats, dropEchoedContext, dropPromptEcho, dropHangul, suspiciousContextOutput, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
 import {
   logMel, buildPromptIds, splitGenerated, makeBpeDecoder, f32ToF16Bits, f16BitsToF32, argmax,
-  makeEmbedder, transcribe, stripLanguageTag, loopCut,
+  makeEmbedder, transcribe, stripLanguageTag, loopCut, makeBpeEncoder,
 } from '../qwen3-asr-core.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -160,6 +160,12 @@ for (const f16 of [false, true]) {
     const cut = await transcribe({ ...base, lang: null, maxNewTokens: 2 });
     assert.equal(cut.tokens, 2);
     assert.equal(cut.text, '');
+
+    // 背景資訊：插在 system 的結束 token 前面，prompt 變長，位置仍然要接得上（錯的話假模型輸出 BAD）
+    const cfgCtx = { ...cfg, prompt: { ...cfg.prompt, prefix_ids: [1, 2, 30, 3] } };
+    const withCtx = await transcribe({ ...base, cfg: cfgCtx, lang: null, contextIds: [8, 9, 12] });
+    assert.equal(withCtx.text, '日本');
+    assert.equal(withCtx.tokens, 6);
   });
 }
 
@@ -197,4 +203,31 @@ test('HY-MT 翻成韓文時判定為可疑，含韓文的句子刪掉', () => {
 test('「…」不算句尾，不會因此判定可疑', () => {
   assert.equal(suspiciousContextOutput('酒好きな人は毎晩飲むし…毎晩飲むし…飲まないと何してるかわからない。',
     '喜歡喝酒的人，每晚都會喝…每晚都會喝…如果不喝酒的話，就不知道自己到底在幹什麼了。'), false);
+});
+
+test('BPE 編碼與 Qwen 官方 tokenizer（tiktoken）完全相同', () => {
+  const fx = JSON.parse(fs.readFileSync(path.join(here, 'fixtures/qwen-bpe-subset.json'), 'utf8'));
+  const enc = makeBpeEncoder(fx.vocab), dec = makeBpeDecoder(fx.vocab);
+  for (const { text, ids } of fx.cases) {
+    assert.deepEqual(enc(text), ids, text);
+    assert.equal(dec(ids), text.normalize('NFC'));
+  }
+});
+
+test('背景資訊插在 system 訊息裡', () => {
+  const cfg = { prompt: {
+    prefix_ids: [151644, 8948, 198, 151645, 198, 151644, 872, 198, 151669],
+    suffix_ids: [151670, 151645, 198], audio_pad_id: 151676, eos_ids: [151643, 151645] } };
+  const { ids, audioStart, context } = buildPromptIds(2, cfg, null, [100, 101]);
+  assert.deepEqual(ids, [151644, 8948, 198, 100, 101, 151645, 198, 151644, 872, 198, 151669, 151676, 151676, 151670, 151645, 198]);
+  assert.equal(audioStart, 11);
+  assert.equal(context, true);
+  assert.equal(buildPromptIds(2, cfg, null, []).audioStart, 9);
+});
+
+test('辨識結果照抄前文時偵測得到', () => {
+  const recent = ['じゃあビール飲みますね。ありがとう。', 'そんなにセンシティブでしょ。'];
+  assert.equal(echoesContext('じゃあビール飲みますね。', recent), true);
+  assert.equal(echoesContext('そうか。そこがまずいことって。', recent), false);
+  assert.equal(echoesContext('ありがとう。', recent), false); // 5 個字：可能真的又說了一次
 });

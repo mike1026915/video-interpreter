@@ -3,18 +3,20 @@
 // 模型格式見 jiangzhuo9357/Qwen3-ASR-1.7B-ONNX 的模型卡（layout v2，所有常數都在 prompt_config.json）。
 // 跟 asr-worker.js 用同一套訊息：load → loaded、transcribe → result / error、progress、status。
 import * as ort from './lib/ort.webgpu.min.mjs';
-import { makeBpeDecoder, makeEmbedder, transcribe } from './qwen3-asr-core.js';
-import { ORT_WASM_PATHS, gpuInfo } from './shared.js';
+import { makeBpeDecoder, makeBpeEncoder, makeEmbedder, transcribe } from './qwen3-asr-core.js';
+import { ORT_WASM_PATHS, gpuInfo, echoesContext } from './shared.js';
 
 ort.env.wasm.wasmPaths = { ...ORT_WASM_PATHS }; // 不從 CDN 載入，見 shared.js
 
 const CACHE_NAME = 'qwen3-asr-models';
+const CONTEXT_FIXED_TOKENS = 120;  // 背景資訊：使用者填的關鍵字＋影片標題，最多這麼多 token（從前面算）
+const CONTEXT_RECENT_TOKENS = 120; // 背景資訊：前幾句辨識結果，最多這麼多 token（從最近的句子往回算）
 const TOKENS_PER_SECOND = 25;   // 生成上限 = 音訊秒數 × 25 + 20（日文快語速約每秒 10 個 token），再受模型的 256 限制
 
 const errMsg = (err) => String((err && err.message) || err);
 const status = (text) => self.postMessage({ type: 'status', text });
 
-let state = null;   // { model, sessions, cfg, embedder, decode, filters, f16 }
+let state = null;   // { model, sessions, cfg, embedder, decode, encode, filters, f16 }
 
 // 下載一個檔案（有快取就直接讀），回報進度
 async function fetchFile(model, file) {
@@ -115,6 +117,7 @@ async function load(model) {
     sessions: { encoder, init, step },
     embedder: makeEmbedder(cfg, table, scales),
     decode: makeBpeDecoder(vocab, added),
+    encode: makeBpeEncoder(vocab),
   };
 
   // 用 1 秒靜音實際跑一次：確認 WebGPU 能執行，也順便預熱
@@ -129,14 +132,28 @@ function isoOf(name) {
   return hit ? hit[0] : null;
 }
 
-function run(audio, lang, maxNewTokens) {
+function run(audio, lang, maxNewTokens, contextIds = []) {
   const s = state;
   const forced = lang && s.cfg.language_prefix_ids?.[lang] ? lang : null;
   return transcribe({
     ort, sessions: s.sessions, cfg: s.cfg, embedder: s.embedder, decode: s.decode, filters: s.filters,
-    audio, lang: forced, f16: s.f16,
+    audio, lang: forced, f16: s.f16, contextIds,
     maxNewTokens: maxNewTokens ?? Math.ceil((audio.length / 16000) * TOKENS_PER_SECOND) + 20,
   });
+}
+
+// 背景資訊 → token。context：{ fixed：關鍵字與影片標題, recent：前幾句辨識結果（舊 → 新）}
+function contextIds(context) {
+  if (!context) return [];
+  const fixed = context.fixed?.trim() ? state.encode(context.fixed.trim()).slice(0, CONTEXT_FIXED_TOKENS) : [];
+  let recent = [];
+  for (const line of [...(context.recent || [])].reverse()) {   // 從最近的句子往回加，整句放不下就停
+    const ids = state.encode(line);
+    if (recent.length + ids.length > CONTEXT_RECENT_TOKENS) break;
+    recent = [...ids, ...recent];
+  }
+  if (!fixed.length) return recent;
+  return recent.length ? [...fixed, ...state.encode('\n'), ...recent] : fixed;
 }
 
 self.onmessage = async (e) => {
@@ -147,7 +164,14 @@ self.onmessage = async (e) => {
       self.postMessage({ type: 'loaded', device: 'webgpu', fellBack: false, reason: '' });
     } else if (m.type === 'transcribe') {
       if (!state) throw new Error('辨識模型尚未載入成功');
-      const out = await run(m.audio, m.lang || null);
+      const ctxIds = contextIds(m.context);
+      let out = await run(m.audio, m.lang || null, undefined, ctxIds);
+      if (ctxIds.length && m.context.recent?.length && echoesContext(out.text, m.context.recent)) {
+        // 照抄了前文：這段不帶背景資訊重新辨識
+        const retry = await run(m.audio, m.lang || null);
+        console.log('[qwen3-asr] 辨識結果照抄前文，不帶背景資訊重新辨識', { first: out.text, retry: retry.text });
+        out = retry;
+      }
       // 自動偵測時，模型自己判斷的語言（例如「Japanese」）轉成 ISO 代碼回傳，側欄就不必再偵測一次
       const lang = out.language ? isoOf(out.language) : null;
       if (out.language) console.log('[qwen3-asr] 偵測到語言', out.language, lang);

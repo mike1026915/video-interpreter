@@ -108,11 +108,16 @@ export function logMel(audio, filters) {
 
 // ===== prompt =====
 // prompt_config.json：prompt.prefix_ids + A 個 audio_pad + prompt.suffix_ids（+ 指定語言時的 language_prefix_ids）
-export function buildPromptIds(numAudio, cfg, lang) {
+// contextIds：背景資訊的 token（前文、人名、影片標題…）。Qwen3-ASR 把它放在 system 訊息裡，
+// 辨識時會參考（同音詞、專有名詞比較準）。prefix 是「<|im_start|>system\n<|im_end|>\n<|im_start|>user\n<|audio_start|>」，
+// 背景資訊插在 system 的 <|im_end|> 前面；prefix 裡找不到 <|im_end|>（eos_ids 之一）就不放。
+export function buildPromptIds(numAudio, cfg, lang, contextIds = []) {
   const p = cfg.prompt;
   const forcedIds = lang ? cfg.language_prefix_ids?.[lang] : null;
-  const ids = [...p.prefix_ids, ...new Array(numAudio).fill(p.audio_pad_id), ...p.suffix_ids, ...(forcedIds || [])];
-  return { ids, audioStart: p.prefix_ids.length, forced: !!forcedIds };
+  const end = contextIds.length ? p.prefix_ids.findIndex((id) => p.eos_ids.includes(id)) : -1;
+  const prefix = end < 0 ? p.prefix_ids : [...p.prefix_ids.slice(0, end), ...contextIds, ...p.prefix_ids.slice(end)];
+  const ids = [...prefix, ...new Array(numAudio).fill(p.audio_pad_id), ...p.suffix_ids, ...(forcedIds || [])];
+  return { ids, audioStart: prefix.length, forced: !!forcedIds, context: end >= 0 };
 }
 
 // 生成的 token：「language Japanese<asr_text>文字…<eos>」。切掉 <asr_text> 之前的部分和結尾的 eos。
@@ -170,6 +175,31 @@ export function makeBpeDecoder(vocab, added = {}) {
     }
     return dec.decode(new Uint8Array(bytes));
   };
+}
+
+// ===== byte-level BPE 編碼（只用來把「背景資訊」轉成 token 當提示）=====
+// Qwen 的 BPE 是從 tiktoken 來的：合併的優先順序就是合併後 token 的 id（越小越先合併），
+// 所以只要 vocab.json，不需要 11MB 的 tokenizer.json。切詞規則（pre-tokenize）跟 Qwen2 tokenizer 一樣，並先做 NFC。
+const PRETOKENIZE = /(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu;
+export function makeBpeEncoder(vocab) {
+  const charOf = [];
+  for (const [ch, b] of byteDecoderTable()) charOf[b] = ch;
+  const utf8 = new TextEncoder();
+  const rank = (tok) => vocab[tok] ?? Infinity;
+  function bpe(chunk) {
+    let parts = [...utf8.encode(chunk)].map((b) => charOf[b]);
+    while (parts.length > 1) {
+      let best = Infinity, at = -1;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const r = rank(parts[i] + parts[i + 1]);
+        if (r < best) { best = r; at = i; }
+      }
+      if (at < 0) break;
+      parts = [...parts.slice(0, at), parts[at] + parts[at + 1], ...parts.slice(at + 2)];
+    }
+    return parts.map((p) => vocab[p]).filter((id) => id != null);
+  }
+  return (text) => (text.normalize('NFC').match(PRETOKENIZE) || []).flatMap(bpe);
 }
 
 // ===== float16 =====
@@ -263,7 +293,7 @@ export function loopCut(ids, minRepeats = 4, maxPeriod = 12) {
 // ===== 整段辨識 =====
 // ort：onnxruntime-web 模組；sessions：{ encoder, init, step }；f16：decoder 是否用 float16 I/O
 // 回傳 { text, language（模型自己判斷的語言名稱，有指定語言時為 null）, tokens }
-export async function transcribe({ ort, sessions, cfg, embedder, decode, filters, audio, lang, f16, maxNewTokens }) {
+export async function transcribe({ ort, sessions, cfg, embedder, decode, filters, audio, lang, f16, maxNewTokens, contextIds = [] }) {
   const mel = logMel(audio, filters);
   const encOut = await sessions.encoder.run({
     mel: new ort.Tensor('float32', mel.data, [1, filters.n_mels, mel.T]),
@@ -273,7 +303,7 @@ export async function transcribe({ ort, sessions, cfg, embedder, decode, filters
   if (H !== embedder.hidden) throw new Error(`encoder 輸出寬度 ${H} 與嵌入表 ${embedder.hidden} 不符`);
   const featData = feats.data;
 
-  const { ids, audioStart, forced } = buildPromptIds(A, cfg, lang);
+  const { ids, audioStart, forced } = buildPromptIds(A, cfg, lang, contextIds);
   const S = ids.length;
   const x = new Float32Array(S * H);
   for (let i = 0; i < S; i++) {
