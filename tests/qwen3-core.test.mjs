@@ -232,6 +232,22 @@ test('辨識結果照抄前文時偵測得到', () => {
   assert.equal(echoesContext('ありがとう。', recent), false); // 5 個字：可能真的又說了一次
 });
 
+test('辨識結果複述背景資訊或標題（含跨語言）時偵測得到', () => {
+  const fixed = '前輩要去後輩的家裡躲雨，後輩問要喝什麼飲料，然後再喝酒\nホロライブ切り抜き';
+  // 實際案例：中文敘述被複述成日文
+  assert.equal(echoesContext('前輩、後輩の家に、後輩、後輩', [], fixed), true);
+  // 同語言照抄
+  assert.equal(echoesContext('後輩問要喝什麼飲料', [], fixed), true);
+  // 正常講話：句子裡只有一兩個詞在背景資訊裡
+  assert.equal(echoesContext('水道水がいいかな。うん。清水。', [], fixed), false);
+  assert.equal(echoesContext('先輩って同社でエスな方なんですか。', [], fixed), false);
+  // 人名、作品名被正常講出來不算
+  assert.equal(echoesContext('宝鐘マリンです。', [], '宝鐘マリン、ホロライブ'), false);
+  assert.equal(echoesContext('ホロライブの宝鐘マリンです。', [], '宝鐘マリン、ホロライブ'), false);
+  // 沒有 fixed 時行為不變
+  assert.equal(echoesContext('前輩、後輩の家に、後輩、後輩', []), false);
+});
+
 test('重疊部分重複辨識的字刪掉', () => {
   assert.equal(dropOverlap('ビール飲みたいんだけど', 'けど、やっぱりやめとく。'), 'やっぱりやめとく。');
   assert.equal(dropOverlap('そういうことなんですよね。', 'よね。まあいいや。'), 'まあいいや。');

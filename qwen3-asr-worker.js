@@ -177,8 +177,8 @@ self.onmessage = async (e) => {
       if (!state) throw new Error('辨識模型尚未載入成功');
       const ctxIds = contextIds(m.context);
       let out = await run(m.audio, m.lang || null, undefined, ctxIds);
-      if (ctxIds.length && m.context.recent?.length && echoesContext(out.text, m.context.recent)) {
-        // 照抄了前文：這段不帶背景資訊重新辨識
+      if (ctxIds.length && echoesContext(out.text, m.context.recent || [], m.context.fixed || '')) {
+        // 照抄了前文、使用者填的背景資訊或標題：這段不帶背景資訊重新辨識
         const retry = await run(m.audio, m.lang || null);
         console.log('[qwen3-asr] 辨識結果照抄前文，不帶背景資訊重新辨識', { first: out.text, retry: retry.text });
         out = retry;
