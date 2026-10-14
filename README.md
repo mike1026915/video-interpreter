@@ -41,6 +41,7 @@
 - 只能用 WebGPU（CPU 太慢跟不上影片），沒有 WebGPU 會顯示錯誤，請改用 Whisper。
 - 模型檔存在瀏覽器的 Cache Storage（`qwen3-asr-models`），第二次開始不會重新下載。
 - 自訂模型欄也可以填其他同格式（layout v2，有 `prompt_config.json`）的 Qwen3-ASR ONNX，模型 ID 含 `qwen3-asr` 就會用這個 worker。
+- **prompt 修正**：`jiangzhuo9357/Qwen3-ASR-*-ONNX` 的 `prompt_config.json` 把 prompt 裡的「system」「user」寫成 Llama 3 的 token id（在 Qwen 詞表是「 Current」「 time」），模型看到的格式跟訓練時不同。載入時會自動換回正確的 token（console 印 `[qwen3-asr] 修正 prompt 的角色 token`）。
 - **背景資訊**：辨識時會把「你在『背景資訊』欄填的關鍵字 + 影片分頁標題 + 前 2 段辨識結果」放進 prompt 的 system 訊息（Qwen3-ASR 官方支援的用法），同音詞、人名、作品名比較容易辨識對。欄位只在選 Qwen3-ASR 時出現，內容會記住。
   - 文字轉 token 用自己寫的 byte-level BPE 編碼（`qwen3-asr-core.js` 的 `makeBpeEncoder`，只用 `vocab.json`），跟 Qwen 官方 tokenizer 逐 token 比對過（`tests/fixtures/qwen-bpe-subset.json`）。
   - 聽不清楚時模型偶爾會照抄前文：辨識結果有一句（6 字以上）跟前文幾乎一樣，就不帶背景資訊重新辨識一次（console 會印 `[qwen3-asr] 辨識結果照抄前文`）。

@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dropOverlap, echoesContext, periodicity, collapseRepeats, dropEchoedContext, dropPromptEcho, dropHangul, suspiciousContextOutput, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
 import {
   logMel, buildPromptIds, splitGenerated, makeBpeDecoder, f32ToF16Bits, f16BitsToF32, argmax,
-  makeEmbedder, transcribe, stripLanguageTag, loopCut, makeBpeEncoder,
+  makeEmbedder, transcribe, stripLanguageTag, loopCut, makeBpeEncoder, fixRoleTokens,
 } from '../qwen3-asr-core.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -239,4 +239,16 @@ test('重疊部分重複辨識的字刪掉', () => {
   assert.equal(dropOverlap('あ', 'あ、そうですね。'), 'あ、そうですね。');   // 1 個字的巧合不刪
   assert.equal(dropOverlap('ですね', 'ですね'), 'ですね');                   // 全部重複時保留原樣
   assert.equal(dropOverlap('', 'こんにちは'), 'こんにちは');
+});
+
+test('prompt 的角色 token 修正成 system / user', () => {
+  const enc = (t) => ({ system: [8948], user: [872] })[t];
+  const bad = [151644, 9125, 198, 151645, 198, 151644, 882, 198, 151669];
+  assert.deepEqual(fixRoleTokens(bad, 151644, enc), [151644, 8948, 198, 151645, 198, 151644, 872, 198, 151669]);
+  const good = [151644, 8948, 198, 151645, 198, 151644, 872, 198, 151669];
+  assert.deepEqual(fixRoleTokens(good, 151644, enc), good);
+  assert.deepEqual(fixRoleTokens([1, 2, 3], 151644, enc), [1, 2, 3]); // 沒有 <|im_start|>
+  // 真的詞表：「system」「user」各是一個 token
+  const fx = JSON.parse(fs.readFileSync(path.join(here, 'fixtures/qwen-bpe-subset.json'), 'utf8'));
+  assert.ok(fx.vocab.system === 8948 && fx.vocab.user === 872);
 });
