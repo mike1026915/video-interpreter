@@ -168,6 +168,7 @@ HF_TOKEN=hf_你的寫入權限token tools/convert-qwen3-asr.sh neosophie/Qwen3-A
 ```
 
 - 需要 Linux 或 macOS、Python 3.10 以上、約 16GB 記憶體、約 30GB 硬碟；1.7B 在 4 核心 CPU 上約 30～60 分鐘。
+- 網路要能連 `huggingface.co` **和** `*.hf.co`（模型檔實際從 `us.aws.cdn.hf.co`、`cas-server.xethub.hf.co` 這類網域下載），以及 github.com、pypi.org。在 Claude Code 雲端環境跑時，這兩個都要加進允許的網域。
 - 流程是 Sokuji 專案發布 `jiangzhuo9357/Qwen3-ASR-1.7B-ONNX` 的步驟（andrewleech/qwen3-asr-onnx 匯出 → Sokuji 的 layout v2 腳本），執行時才 clone 這兩個 repo。另外修正了匯出程式把 prompt 的 system / user 寫成 Llama 3 token id 的錯。
 - 第二個參數填 `-` 就只轉換不上傳。
 - 演練過：在連不到 Hugging Face 的環境，用一個同架構、維度很小、隨機權重的模型（搭配 Qwen 官方 tokenizer）跑完整個腳本，再用擴充功能自己的 `qwen3-asr-core.js` 載入轉出的 q4 / q4f16 跑完辨識流程。真的日文模型還沒轉過。
