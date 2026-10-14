@@ -54,7 +54,7 @@ const HALLUCINATIONS = [
 const $ = (id) => document.getElementById(id);
 const els = {
   srcLang: $('srcLang'), model: $('model'), customModel: $('customModel'), customRow: $('customRow'),
-  asrContext: $('asrContext'), contextRow: $('contextRow'), forceQ4: $('forceQ4'), q4Row: $('q4Row'),
+  asrContext: $('asrContext'), contextRow: $('contextRow'), forceQ4: $('forceQ4'), q4Row: $('q4Row'), translateCtx: $('translateCtx'),
   mode: $('mode'), engine: $('engine'), start: $('startBtn'), stop: $('stopBtn'),
   exp: $('exportBtn'), clear: $('clearBtn'), status: $('status'), progress: $('progress'),
   dl: $('dlTranslatorBtn'), list: $('list'),
@@ -73,8 +73,9 @@ function showCustomRow() {
 }
 
 let modelPicked = false;          // 使用者在這次開側欄後自己選過模型：不要再套用預設值
-chrome.storage.local.get(['srcLang', 'model', 'customModel', 'mode', 'engine', 'asrContext', 'forceQ4']).then(async (s) => {
+chrome.storage.local.get(['srcLang', 'model', 'customModel', 'mode', 'engine', 'asrContext', 'forceQ4', 'translateCtx']).then(async (s) => {
   els.forceQ4.checked = !!s.forceQ4;
+  els.translateCtx.checked = !!s.translateCtx;
   if (s.asrContext) els.asrContext.value = s.asrContext;
   if (s.srcLang) els.srcLang.value = s.srcLang;
   if (s.customModel) els.customModel.value = s.customModel;
@@ -97,6 +98,7 @@ els.model.onchange = () => {
 };
 els.customModel.onchange = () => { chrome.storage.local.set({ customModel: els.customModel.value.trim() }); showCustomRow(); };
 els.forceQ4.onchange = () => chrome.storage.local.set({ forceQ4: els.forceQ4.checked });
+els.translateCtx.onchange = () => chrome.storage.local.set({ translateCtx: els.translateCtx.checked });
 els.asrContext.onchange = () => chrome.storage.local.set({ asrContext: els.asrContext.value.trim() });
 
 // 回傳要載入的模型 ID；自訂模型格式不對時丟出錯誤
@@ -682,7 +684,7 @@ async function getReverseTranslator(dst, withActivation) {
 const contextTranslations = new Map();  // `${src}\n${text}` -> Promise<翻譯後的文字>
 // 回傳翻成 src 的背景資訊；不需要翻（不是中文、不知道語言、src 是中文）或翻不了（模型還沒下載、不支援）就回傳原文
 async function localizeContext(text, src) {
-  if (!text || !src || src === 'zh') return text;
+  if (!els.translateCtx.checked || !text || !src || src === 'zh') return text;
   const key = `${src}\n${text}`;
   if (!contextTranslations.has(key)) {
     contextTranslations.set(key, (async () => {
@@ -726,7 +728,7 @@ async function start() {
     } else if (srcSetting !== 'zh') {
       getTranslator(srcSetting, true).catch((err) => setStatus(err.message, true));
       const ctxText = els.asrContext.value.trim();
-      if (isQwen3Asr(model) && ctxText) {
+      if (isQwen3Asr(model) && ctxText && els.translateCtx.checked) {
         detectLang(ctxText).then((l) => l === 'zh' && getReverseTranslator(srcSetting, true)).catch(() => {});
       }
     }
