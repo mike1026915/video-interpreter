@@ -18,6 +18,7 @@ Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機語音辨�
   - 依模型選 worker：模型 ID 含 `qwen3-asr` → `qwen3-asr-worker.js`，其他 → `asr-worker.js`。送給 worker 的語言是 ISO 代碼（`ja`），自動偵測時為 null。
   - 沒選過模型時：有 WebGPU 預設 large-v3-turbo，沒有就 small。
   - 翻譯引擎選 HY-MT1.5 時另開 `mt-worker.js`，帶前 2 句原文當上下文；載入失敗就改用 Chrome 內建翻譯。
+  - HY-MT1.5（1.8B）偶爾會把上下文也翻進輸出：`shared.js` 的 `dropEchoedContext` 把跟前 2 句譯文幾乎相同的句子刪掉（bigram Dice ≥ 0.7 或互相包含，4 字以下不刪）。
   - Translator / LanguageDetector 下載模型需要使用者手勢，所以在「開始」按鈕的 click 裡先觸發；自動偵測語言時若需要下載，會顯示一個按鈕讓使用者點。
 - `asr-worker.js`：module worker，跑 transformers.js 的 `automatic-speech-recognition` pipeline（Whisper、Cohere Transcribe）。有 WebGPU 用 webgpu，依顯示卡有沒有 `shader-f16` 選檔案（turbo：fp16 或 q4 encoder + q4 decoder；Cohere：q4f16 或 q4），沒有 WebGPU 時 Whisper 退回 wasm q8，Cohere 直接報錯。模型從 Hugging Face 下載後由瀏覽器快取。
 - `qwen3-asr-worker.js` + `qwen3-asr-core.js`：Qwen3-ASR（`jiangzhuo9357/Qwen3-ASR-1.7B-ONNX`，layout v2，介面寫在模型卡和 `prompt_config.json`）。transformers.js 不支援，所以自己做 log-mel、prompt、嵌入（int8 表 × scale）、encoder → decoder_init → decoder_step 貪婪解碼、byte-level BPE 解碼。KV cache 用 `preferredOutputLocation: 'gpu-buffer'` 留在 GPU。只支援 WebGPU。模型檔自己下載、存在 Cache Storage `qwen3-asr-models`。

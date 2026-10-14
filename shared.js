@@ -17,6 +17,34 @@ export function collapseRepeats(text) {
   return text.replace(/(.{1,12}?)\1{3,}/gu, '$1$1');
 }
 
+// HY-MT1.5 有時會把當作上下文的前一句也翻進來，例如「這一句的譯文。上一句的譯文。」
+// 把譯文切成句子，跟前幾句的譯文幾乎相同的句子刪掉；全部都被刪掉時保留原輸出。
+const PUNCT = /[\s、。，,.！!？?…「」『』（）()"'：:；;~～\-—]/g;
+const splitSentences = (s) => s.match(/[^。！？!?…]+[。！？!?…]*|[。！？!?…]+/g) || [s];
+function bigrams(s) {
+  const m = new Map();
+  for (let i = 0; i < s.length - 1; i++) { const b = s.slice(i, i + 2); m.set(b, (m.get(b) || 0) + 1); }
+  return m;
+}
+function dice(a, b) {
+  if (a.length < 2 || b.length < 2) return a === b ? 1 : 0;
+  const A = bigrams(a), B = bigrams(b);
+  let inter = 0;
+  for (const [k, n] of A) inter += Math.min(n, B.get(k) || 0);
+  return (2 * inter) / (a.length - 1 + b.length - 1);
+}
+export function dropEchoedContext(text, previous) {
+  const prev = previous.flatMap(splitSentences).map((s) => s.replace(PUNCT, '')).filter((s) => s.length >= 4);
+  if (!prev.length) return text;
+  const kept = splitSentences(text).filter((s) => {
+    const n = s.replace(PUNCT, '');
+    if (n.length < 4) return true; // 太短的（「是啊」）可能真的重複說了，不刪
+    return !prev.some((p) => p === n || p.includes(n) || n.includes(p) || dice(n, p) >= 0.7);
+  });
+  const out = kept.join('').trim();
+  return out || text;
+}
+
 // adapter：WebGPU adapter（沒有則為 null）；ok：有 WebGPU；
 // f16：支援 shader-f16（Linux 的 NVIDIA 等 Vulkan 環境常常沒有，fp16 模型會跑不動）
 export async function gpuInfo() {

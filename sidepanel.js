@@ -1,4 +1,4 @@
-import { isQwen3Asr, isCohere, gpuInfo, collapseRepeats } from './shared.js';
+import { isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext } from './shared.js';
 
 // ===== 設定 =====
 const TARGET = 'zh-Hant';
@@ -197,6 +197,7 @@ let mtFailed = false;             // 這次口譯載入失敗，改用 Chrome �
 const pendingMt = new Map();
 let mtSeq = 0;
 const mtContext = [];             // 最近幾句原文，翻譯時當上下文
+const mtRecentZh = [];            // 最近幾句譯文，用來刪掉模型重翻上下文的部分
 
 function loadMt() {
   if (mtReady) return mtReady;
@@ -323,7 +324,12 @@ async function translateUnit(unit, src, tr) {
       const context = mtContext.join('\n');
       mtContext.push(unit.text);
       if (mtContext.length > MT_CONTEXT_SENTENCES) mtContext.shift();
-      last.setZh(await mtTranslate(unit.text, context));
+      const raw = await mtTranslate(unit.text, context);
+      const zh = dropEchoedContext(raw, mtRecentZh);
+      if (zh !== raw) console.log('[mt] 刪掉重翻的上下文', { raw, zh });
+      mtRecentZh.push(zh);
+      if (mtRecentZh.length > MT_CONTEXT_SENTENCES) mtRecentZh.shift();
+      last.setZh(zh);
     }
   } catch (err) {
     last.setZh(`（翻譯失敗：${err.message}）`);
@@ -566,6 +572,7 @@ async function start() {
 
     let mtNote = '';
     mtContext.length = 0; // 不要把上一部影片的句子當成這次的上下文
+    mtRecentZh.length = 0;
     if (engine !== 'hymt' || srcSetting === 'zh') unloadMt();
     if (engine === 'hymt' && srcSetting !== 'zh') {
       mtFailed = false;
@@ -750,7 +757,7 @@ function makeSegmenter(inRate, onSegment, onDrop) {
 // ===== 按鈕 =====
 els.start.onclick = start;
 els.stop.onclick = stop;
-els.clear.onclick = () => { transcript.length = 0; mtContext.length = 0; resetGroup(); showEmpty(); };
+els.clear.onclick = () => { transcript.length = 0; mtContext.length = 0; mtRecentZh.length = 0; resetGroup(); showEmpty(); };
 els.exp.onclick = () => {
   if (!transcript.length) return;
   const text = transcript.map((e) => `[${fmtTime(e.t0)}]\n${e.text}\n${e.zh ? e.zh + '\n' : ''}`).join('\n');
