@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { periodicity, collapseRepeats, dropEchoedContext, dropPromptEcho, suspiciousContextOutput, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
+import { periodicity, collapseRepeats, dropEchoedContext, dropPromptEcho, dropHangul, suspiciousContextOutput, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
 import {
   logMel, buildPromptIds, splitGenerated, makeBpeDecoder, f32ToF16Bits, f16BitsToF32, argmax,
   makeEmbedder, transcribe, stripLanguageTag, loopCut,
@@ -185,4 +185,11 @@ test('periodicity：有音高的聲音接近 1，雜音很低', () => {
   assert.ok(periodicity(voice) > 0.8, `voice ${periodicity(voice)}`);
   assert.ok(periodicity(noise) < 0.3, `noise ${periodicity(noise)}`);
   assert.equal(periodicity(new Float32Array(1600)), 0);
+});
+
+test('HY-MT 翻成韓文時判定為可疑，含韓文的句子刪掉', () => {
+  const zh = '그렇군요。那個就是有問題的地方呢。就是太過激了，再加上缺乏自信吧。';
+  assert.equal(suspiciousContextOutput('そうか。そこがまずいことって。あんまり過激にって、あと自信でじゃん。', zh), true);
+  assert.equal(dropHangul(zh, 'そうか。'), '那個就是有問題的地方呢。就是太過激了，再加上缺乏自信吧。');
+  assert.equal(dropHangul('是「안녕」的意思。', '「안녕」ってどういう意味？'), '是「안녕」的意思。');
 });
