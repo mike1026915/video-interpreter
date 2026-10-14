@@ -413,7 +413,7 @@ function addSkipNote(t0, reason, kind = '') {
   const nearBottom = els.list.scrollHeight - els.list.scrollTop - els.list.clientHeight < 80;
   els.list.appendChild(div);
   if (nearBottom) els.list.scrollTop = els.list.scrollHeight;
-  console.log('[skip]', fmtTime(t0), reason);
+  console.log('[skip]', div.textContent); // 沒有時間的提示（空白、跳轉）不要印成 00:00
 }
 
 function fmtTime(s) {
@@ -476,7 +476,8 @@ function noteGap(times, gapPeak) {
     const hint = gapPeak >= GAP_QUIET_RATIO
       ? `期間最大音量到門檻的 ${Math.round(gapPeak * 100)}%，可能有小聲說話被當成靜音`
       : '期間都很安靜';
-    addSkipNote(null, `⋯ ${fmtTime(prev.end)}～${fmtTime(times.start)} 約 ${Math.round(g.s)} 秒沒有辨識到聲音（${hint}）`, 'gap');
+    // 兩端時間只顯示到整秒（無條件捨去），秒數若也取整數會對不上（08～11 卻寫 4 秒），所以顯示到小數一位
+    addSkipNote(null, `⋯ ${fmtTime(prev.end)}～${fmtTime(times.start)} ${g.s.toFixed(1)} 秒沒有辨識到聲音（${hint}）`, 'gap');
   }
 }
 
