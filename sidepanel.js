@@ -1,4 +1,6 @@
-import { isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext } from './shared.js';
+import {
+  isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext, videoStartFrom, classifyGap,
+} from './shared.js';
 
 // ===== 設定 =====
 const TARGET = 'zh-Hant';
@@ -24,6 +26,7 @@ const LONG_SEG_S = 6;           // 累積超過 6 秒後，改用較短的停頓
 const LONG_END_SILENCE_S = 0.35;
 const MIN_VOICED_S = 0.3;       // 有聲音的部分不到 0.3 秒就丟掉（避免 Whisper 對靜音亂講；太高會吃掉「はい」這類短回應）
 const MIN_NOTE_VOICED_S = 0.15; // 被丟掉的段落若有聲音部分超過這個長度，就在畫面上留一行提示
+const GAP_QUIET_RATIO = 0.5;    // 空白期間最大音量超過門檻的這個比例，就提示「可能有小聲說話被當成靜音」
 
 const TURBO = 'onnx-community/whisper-large-v3-turbo';
 const SMALL = 'onnx-community/whisper-small';
@@ -385,11 +388,11 @@ function addEntry(t0, text, timing = {}) {
 
 // 被略過的段落（辨識為空、被當成幻覺濾掉、有聲音的部分太短、辨識出錯）：
 // 不進逐字稿，只在畫面上留一行淡色提示，才知道「漏掉」是漏在哪一關
-function addSkipNote(t0, reason) {
+function addSkipNote(t0, reason, kind = '') {
   els.list.querySelector('.empty')?.remove();
   const div = document.createElement('div');
-  div.className = 'skip';
-  div.textContent = `${fmtTime(t0)} · ${reason}`;
+  div.className = kind ? `skip ${kind}` : 'skip';
+  div.textContent = t0 == null ? reason : `${fmtTime(t0)} · ${reason}`;
   const nearBottom = els.list.scrollHeight - els.list.scrollTop - els.list.clientHeight < 80;
   els.list.appendChild(div);
   if (nearBottom) els.list.scrollTop = els.list.scrollHeight;
@@ -397,8 +400,67 @@ function addSkipNote(t0, reason) {
 }
 
 function fmtTime(s) {
-  const m = Math.floor(s / 60), ss = Math.floor(s % 60);
-  return `${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = Math.floor(s % 60);
+  const mmss = `${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+  return h ? `${h}:${mmss}` : mmss;
+}
+
+// ===== 影片時間 =====
+// 顯示的時間是影片的播放時間（讀分頁裡 <video> 的 currentTime），不是開始口譯後經過的時間。
+// 讀不到（沒有 video、影片在跨網域 iframe 裡、權限失效）就退回從開始口譯起算的時間。
+let videoTabId = null;
+let videoWarned = false;
+let prevSeg = null;              // 上一段（含被略過的段落）的時間，用來標示空白與跳轉
+
+// 在影片分頁裡執行：挑正在播放的、畫面最大的 video
+function pickVideoTime() {
+  const vs = [...document.querySelectorAll('video')];
+  if (!vs.length) return null;
+  const score = (v) => (!v.paused && !v.ended ? 1e12 : 0) + v.videoWidth * v.videoHeight;
+  const v = vs.sort((a, b) => score(b) - score(a))[0];
+  return { t: v.currentTime, at: Date.now(), paused: v.paused, rate: v.playbackRate || 1 };
+}
+
+async function readVideo() {
+  if (videoTabId == null) return null;
+  try {
+    const [r] = await chrome.scripting.executeScript({ target: { tabId: videoTabId }, func: pickVideoTime });
+    return r?.result || null;
+  } catch (err) {
+    if (!videoWarned) { videoWarned = true; console.warn('[video] 讀不到影片時間，改用從開始口譯起算的時間', err); }
+    return null;
+  }
+}
+
+// 切段當下呼叫（越早越準）：回傳 Promise<{ start, end, cap0, cap1, rate, video }>
+function segmentTimes(t0, info) {
+  const flushWall = Date.now();
+  return readVideo().then((read) => {
+    const dur = info.end - t0;
+    if (!read) return { start: t0, end: info.end, cap0: t0, cap1: info.end, rate: 1, video: false };
+    const start = videoStartFrom(read, flushWall, info.now - t0);
+    return { start, end: start + dur * (read.rate || 1), cap0: t0, cap1: info.end, rate: read.rate || 1, video: true };
+  });
+}
+
+// 依序（辨識佇列的順序）呼叫：跟上一段比，有空白或跳轉就留一行提示
+function noteGap(times, gapPeak) {
+  const prev = prevSeg;
+  prevSeg = times;
+  if (!prev || prev.video !== times.video) return;
+  const g = classifyGap(prev, times);
+  if (g.kind === 'seek') {
+    // 前轉／後轉：跳轉前後的句子不相干，不要合併成一句翻譯，也不要當成 HY-MT 的上下文
+    flushGroup();
+    mtContext.length = 0;
+    mtRecentZh.length = 0;
+    addSkipNote(null, `↪ 影片跳到 ${fmtTime(times.start)}`, 'seek');
+  } else if (g.kind === 'gap') {
+    const hint = gapPeak >= GAP_QUIET_RATIO
+      ? `期間最大音量到門檻的 ${Math.round(gapPeak * 100)}%，可能有小聲說話被當成靜音`
+      : '期間都很安靜';
+    addSkipNote(null, `⋯ ${fmtTime(prev.end)}～${fmtTime(times.start)} 約 ${Math.round(g.s)} 秒沒有辨識到聲音（${hint}）`, 'gap');
+  }
 }
 
 function showEmpty() {
@@ -486,12 +548,26 @@ let backlog = 0;
 let runNote = '';               // 狀態列上「GPU 加速 / 改用 CPU」的說明，辨識完每段都會重新顯示
 let runNoteIsWarn = false;
 
-function enqueueSegment(audio, t0, srcSetting) {
+// 有聲音但太短而被丟掉的段落：也照佇列順序處理，提示才不會插到前面還在辨識的段落之前
+function enqueueDrop(t0, voicedS, info) {
+  const timesP = segmentTimes(t0, info);
+  queue = queue.then(async () => {
+    const times = await timesP;
+    noteGap(times, info.gapPeak);
+    addSkipNote(times.start, `略過：有聲音的部分只有 ${voicedS.toFixed(1)}s，太短`);
+  });
+}
+
+function enqueueSegment(audio, cap0, srcSetting, info) {
+  const timesP = segmentTimes(cap0, info);
   backlog++;
   if (backlog > 3) setStatus(`辨識速度跟不上（積了 ${backlog} 段），可以改用較小的模型`, true);
   const audioS = audio.length / SR; // transcribe 會轉移 buffer，先記下長度
   const tEnq = performance.now();
   queue = queue.then(async () => {
+    const times = await timesP;
+    const t0 = times.start;
+    noteGap(times, info.gapPeak);
     try {
       const tStart = performance.now();
       const res = await transcribe(audio, srcSetting === 'auto' ? null : srcSetting);
@@ -554,6 +630,7 @@ async function start() {
     let streamId;
     try {
       streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+      videoTabId = tab.id;
     } catch (err) {
       throw new Error('無法擷取這個分頁的聲音。請在影片分頁上「再點一次工具列的擴充功能圖示」，然後再按開始。（' + err.message + '）');
     }
@@ -594,10 +671,13 @@ async function start() {
     mute.gain.value = 0;
     source.connect(workletNode).connect(mute).connect(ctx.destination);
 
+    prevSeg = null;
+    videoWarned = false;
+    const hasVideo = !!(await readVideo());
     segmenter = makeSegmenter(
       ctx.sampleRate,
-      (audio, t0) => enqueueSegment(audio, t0, srcSetting),
-      (t0, voicedS) => addSkipNote(t0, `略過：有聲音的部分只有 ${voicedS.toFixed(1)}s，太短`),
+      (audio, t0, info) => enqueueSegment(audio, t0, srcSetting, info),
+      (t0, voicedS, info) => enqueueDrop(t0, voicedS, info),
     );
     workletNode.port.onmessage = (e) => segmenter?.push(e.data);
 
@@ -607,7 +687,8 @@ async function start() {
     const deviceNote = info.device === 'webgpu' ? 'GPU 加速'
       : info.fellBack ? 'WebGPU 無法執行這個模型，改用 CPU，會慢很多；建議換回內建模型'
       : '沒有 GPU，使用 CPU，會比較慢';
-    runNote = mtNote ? `${deviceNote}；${mtNote}` : deviceNote;
+    const timeNote = hasVideo ? '時間：影片時間' : '時間：從開始口譯起算（讀不到影片時間）';
+    runNote = [deviceNote, mtNote, timeNote].filter(Boolean).join('；');
     runNoteIsWarn = !!info.fellBack || mtFailed;
     setStatus(`口譯中…（${runNote}；側欄關閉就會停止）`, runNoteIsWarn);
     if (info.fellBack) console.warn('[asr] WebGPU 失敗原因：', info.reason);
@@ -647,6 +728,8 @@ function makeSegmenter(inRate, onSegment, onDrop) {
   let totalOut = 0;
   let segStart = 0;
   let quiet = 0;                  // 距離最後一個有聲音框已經過了幾個音框（不論有沒有在錄段落）
+  let gapPeak = 0;                // 段落之間的空白裡，最大音量 ÷ 門檻（看有沒有小聲說話被當成靜音）
+  let segGapPeak = 0;             // 目前這段開始前那段空白的 gapPeak
 
   let threshold = SILENCE_RMS;    // 目前的有聲音門檻（隨底噪調整）
   const recent = [];              // 最近幾個音框的音量，用來估底噪
@@ -672,14 +755,16 @@ function makeSegmenter(inRate, onSegment, onDrop) {
   }
 
   function flush() {
+    // end：這段結束的擷取時間；now：目前擷取到的時間；gapPeak：這段之前的空白裡，最大音量是門檻的幾倍
+    const info = { end: segStart + frames.length / 10, now: totalOut / SR, gapPeak: segGapPeak };
     if (frames.length && voiced * 0.1 >= MIN_VOICED_S) {
       const g = gainFor();
       const audio = new Float32Array(frames.length * FRAME);
       frames.forEach((f, i) => audio.set(f, i * FRAME));
       if (g > 1) for (let i = 0; i < audio.length; i++) audio[i] = Math.max(-1, Math.min(1, audio[i] * g));
-      onSegment(audio, segStart);
+      onSegment(audio, segStart, info);
     } else if (frames.length && voiced * 0.1 >= MIN_NOTE_VOICED_S) {
-      onDrop?.(segStart, voiced * 0.1);
+      onDrop?.(segStart, voiced * 0.1, info);
     }
     frames = []; rmsArr = []; voiced = 0; trailingSilent = 0; pre = [];
   }
@@ -702,6 +787,7 @@ function makeSegmenter(inRate, onSegment, onDrop) {
       return;
     }
     frames = tailF; rmsArr = tailR; voiced = tailVoiced; segStart = nextStart;
+    segGapPeak = 0; // 緊接著上一段，中間沒有空白
     trailingSilent = 0;
     for (let i = tailR.length - 1; i >= 0 && !isLoud(tailR[i]); i--) trailingSilent++;
   }
@@ -715,11 +801,14 @@ function makeSegmenter(inRate, onSegment, onDrop) {
     quiet = loud ? 0 : quiet + 1;
 
     if (!frames.length) {
-      if (!loud) {                 // 段落從有聲音的地方開始；先記下最近幾個安靜音框當開頭留白
+      if (!loud) {
+        gapPeak = Math.max(gapPeak, r / threshold);                 // 段落從有聲音的地方開始；先記下最近幾個安靜音框當開頭留白
         pre.push({ f, r });
         if (pre.length > PRE_ROLL_FRAMES) pre.shift();
         return;
       }
+      segGapPeak = gapPeak;
+      gapPeak = 0;
       frames = pre.map((p) => p.f); rmsArr = pre.map((p) => p.r);
       segStart = Math.max(0, totalOut / SR - (frames.length + 1) / 10);
       pre = [];
@@ -757,7 +846,7 @@ function makeSegmenter(inRate, onSegment, onDrop) {
 // ===== 按鈕 =====
 els.start.onclick = start;
 els.stop.onclick = stop;
-els.clear.onclick = () => { transcript.length = 0; mtContext.length = 0; mtRecentZh.length = 0; resetGroup(); showEmpty(); };
+els.clear.onclick = () => { prevSeg = null; transcript.length = 0; mtContext.length = 0; mtRecentZh.length = 0; resetGroup(); showEmpty(); };
 els.exp.onclick = () => {
   if (!transcript.length) return;
   const text = transcript.map((e) => `[${fmtTime(e.t0)}]\n${e.text}\n${e.zh ? e.zh + '\n' : ''}`).join('\n');

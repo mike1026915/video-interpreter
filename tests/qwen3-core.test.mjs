@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { collapseRepeats, dropEchoedContext } from '../shared.js';
+import { collapseRepeats, dropEchoedContext, videoStartFrom, classifyGap } from '../shared.js';
 import {
   logMel, buildPromptIds, splitGenerated, makeBpeDecoder, f32ToF16Bits, f16BitsToF32, argmax,
   makeEmbedder, transcribe, stripLanguageTag, loopCut,
@@ -79,6 +79,24 @@ test('HY-MT 重翻上下文時刪掉重複的句子（截圖裡的實例）', ()
   assert.equal(dropEchoedContext('是啊。那麼，就來做飯吧。', ['但是，如果想要喝無酒精飲料的話。']), '是啊。那麼，就來做飯吧。');
   assert.equal(dropEchoedContext('反正也沒什麼用吧。', ['反正也沒什麼用吧。']), '反正也沒什麼用吧。');
   assert.equal(dropEchoedContext('是啊。好吃。', ['是啊。']), '是啊。好吃。');
+});
+
+test('影片時間換算', () => {
+  // 切段後 200ms 讀到 currentTime 100.2（播放中），這段開頭在切段前 5 秒 → 影片 95 秒
+  assert.ok(Math.abs(videoStartFrom({ t: 100.2, at: 1200, paused: false, rate: 1 }, 1000, 5) - 95) < 1e-9);
+  // 1.5 倍速：擷取 4 秒 = 影片 6 秒
+  assert.ok(Math.abs(videoStartFrom({ t: 60, at: 1000, paused: false, rate: 1.5 }, 1000, 4) - 54) < 1e-9);
+  // 讀取時已暫停：不扣讀取延遲
+  assert.ok(Math.abs(videoStartFrom({ t: 30, at: 5000, paused: true, rate: 1 }, 1000, 3) - 27) < 1e-9);
+});
+
+test('時間空白與跳轉', () => {
+  const seg = (start, end, cap0, cap1) => ({ start, end, cap0, cap1, rate: 1 });
+  assert.equal(classifyGap(seg(10, 14, 0, 4), seg(14.5, 18, 4.5, 8)).kind, 'none');      // 正常接續
+  assert.deepEqual(classifyGap(seg(10, 14, 0, 4), seg(19, 22, 9, 12)), { kind: 'gap', s: 5 }); // 5 秒空白
+  assert.equal(classifyGap(seg(10, 14, 0, 4), seg(300, 303, 5, 8)).kind, 'seek');         // 往後拖
+  assert.equal(classifyGap(seg(300, 304, 0, 4), seg(20, 23, 5, 8)).kind, 'seek');         // 往回拖
+  assert.equal(classifyGap(seg(10, 14, 0, 4), seg(14.2, 17, 30, 33)).kind, 'none');       // 中間暫停了 26 秒
 });
 
 test('byte-level BPE 解碼，略過特殊 token', () => {

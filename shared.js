@@ -45,6 +45,28 @@ export function dropEchoedContext(text, previous) {
   return out || text;
 }
 
+// ===== 影片時間 =====
+// read：從影片分頁讀到的 { t: currentTime, at: 讀取當下的 Date.now(), paused, rate }
+// flushWall：切段當下的 Date.now()；backS：這段的開頭在切段當下之前幾秒（擷取時間）
+// 回傳這段開頭在影片裡的時間（秒）
+export function videoStartFrom(read, flushWall, backS) {
+  const rate = read.rate || 1;
+  const sinceFlush = read.paused ? 0 : ((read.at - flushWall) / 1000) * rate;
+  return Math.max(0, read.t - sinceFlush - backS * rate);
+}
+
+// 前後兩段之間：kind = 'seek'（拖了進度條）、'gap'（連續播放中有一段沒辨識到聲音，s 秒）、'none'
+// prev / cur：{ start, end（影片時間或擷取時間）, cap0, cap1（擷取時間）, rate }
+export const GAP_NOTE_S = 2;
+export function classifyGap(prev, cur) {
+  const gap = cur.start - prev.end;
+  const capGap = cur.cap0 - prev.cap1;
+  if (gap < -1) return { kind: 'seek' };                                  // 往回跳
+  if (gap > capGap * (cur.rate || 1) + 2) return { kind: 'seek' };        // 影片時間走得比實際播放還多：往後跳
+  if (gap >= GAP_NOTE_S) return { kind: 'gap', s: gap };                 // 暫停不會讓影片時間前進，所以不會被誤判
+  return { kind: 'none' };
+}
+
 // adapter：WebGPU adapter（沒有則為 null）；ok：有 WebGPU；
 // f16：支援 shader-f16（Linux 的 NVIDIA 等 Vulkan 環境常常沒有，fp16 模型會跑不動）
 export async function gpuInfo() {
