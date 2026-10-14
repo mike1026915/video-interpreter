@@ -75,11 +75,11 @@ async function fetchFile(model, file) {
 
 const fetchJson = async (model, file) => JSON.parse(new TextDecoder().decode(await fetchFile(model, file)));
 
-async function load(model) {
-  if (state?.model === model) return;
+async function load(model, forceQ4 = false) {
+  if (state?.model === model && state.forceQ4 === forceQ4) return;
   const gpu = await gpuInfo();
   if (!gpu.ok) throw new Error('Qwen3-ASR 需要 WebGPU（這台電腦或瀏覽器沒有可用的 WebGPU），請改用 Whisper 模型');
-  const f16 = gpu.f16;
+  const f16 = gpu.f16 && !forceQ4;   // 強制 q4：顯示卡的 fp16 算出亂碼時用
 
   status('下載模型設定…');
   const cfg = await fetchJson(model, 'prompt_config.json');
@@ -124,7 +124,7 @@ async function load(model) {
   }
 
   state = {
-    model, cfg, filters, f16: variantKey === 'q4f16',
+    model, forceQ4, cfg, filters, f16: variantKey === 'q4f16',
     sessions: { encoder, init, step },
     embedder: makeEmbedder(cfg, table, scales),
     decode: makeBpeDecoder(vocab, added),
@@ -171,7 +171,7 @@ self.onmessage = async (e) => {
   const m = e.data;
   try {
     if (m.type === 'load') {
-      await load(m.model);
+      await load(m.model, !!m.forceQ4);
       self.postMessage({ type: 'loaded', device: 'webgpu', fellBack: false, reason: '' });
     } else if (m.type === 'transcribe') {
       if (!state) throw new Error('辨識模型尚未載入成功');
