@@ -54,7 +54,8 @@ export function dropPromptEcho(text) {
 
 // 帶上下文翻譯的結果看起來可疑，要不帶上下文重翻一次：
 // 有提示詞，或是譯文的句數比原文多 2 句以上（多出來的通常是把上下文換句話說又翻了一次）
-const countSentences = (s) => splitSentences(s).filter((x) => x.replace(PUNCT, '').length).length;
+// 數句子時不把「…」當句尾：「每晚都會喝…每晚都會喝…」是一句話裡的停頓，不是多翻了句子
+const countSentences = (s) => (s.match(/[^。！？!?]+[。！？!?]*/g) || []).filter((x) => x.replace(PUNCT, '').length).length;
 export function suspiciousContextOutput(source, zh) {
   return dropPromptEcho(zh) !== zh.trim() || countSentences(zh) > countSentences(source) + 1 ||
     dropHangul(zh, source) !== zh.trim();
