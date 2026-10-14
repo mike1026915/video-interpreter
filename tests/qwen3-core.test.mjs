@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { collapseRepeats } from '../shared.js';
+import { collapseRepeats, dropEchoedContext } from '../shared.js';
 import {
   logMel, buildPromptIds, splitGenerated, makeBpeDecoder, f32ToF16Bits, f16BitsToF32, argmax,
   makeEmbedder, transcribe, stripLanguageTag, loopCut,
@@ -66,6 +66,19 @@ test('重複迴圈：偵測後保留兩次', () => {
   assert.equal(collapseRepeats('あ、もう、もう、もう、もう、もう、もう、もう'), 'あ、もう、もう');
   assert.equal(collapseRepeats('今日はいい天気です'), '今日はいい天気です');
   assert.equal(collapseRepeats('ははははははは'), 'はは');
+});
+
+test('HY-MT 重翻上下文時刪掉重複的句子（截圖裡的實例）', () => {
+  assert.equal(dropEchoedContext('啤酒啊，實在是太難喝了。反正也沒什麼用吧。EbiAidon和啤酒也是一樣的狀況啊。',
+    ['不，其實並沒有那麼美味啦，主要是口感太甜了。', '反正也沒什麼用吧。EbiAidon和啤酒也是一樣的。']),
+  '啤酒啊，實在是太難喝了。');
+  assert.equal(dropEchoedContext('不知道呢，我以為只是喝普通的啤酒而已。不過，如果加入豬肉的話……那麼就變成了調味料了。',
+    ['是啊。那麼，就來做飯吧。', '普通的馬恩啤酒而已啦。不過，如果加入一些豬肉的話……']),
+  '不知道呢，我以為只是喝普通的啤酒而已。那麼就變成了調味料了。');
+  // 沒有重複：原樣保留；全部重複：保留原輸出；短句不刪
+  assert.equal(dropEchoedContext('是啊。那麼，就來做飯吧。', ['但是，如果想要喝無酒精飲料的話。']), '是啊。那麼，就來做飯吧。');
+  assert.equal(dropEchoedContext('反正也沒什麼用吧。', ['反正也沒什麼用吧。']), '反正也沒什麼用吧。');
+  assert.equal(dropEchoedContext('是啊。好吃。', ['是啊。']), '是啊。好吃。');
 });
 
 test('byte-level BPE 解碼，略過特殊 token', () => {
