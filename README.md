@@ -160,6 +160,19 @@
 
 `sidepanel.js`：`MT_CONTEXT_SENTENCES`（HY-MT1.5 帶幾句前文）。
 
+## 轉換 Qwen3-ASR 微調版（例如日文版）
+`tools/convert-qwen3-asr.sh` 把 Hugging Face 上的 Qwen3-ASR 或它的微調版，轉成這個擴充功能能用的瀏覽器版（layout v2，q4 + q4f16），上傳到你自己的 Hugging Face 帳號：
+
+```bash
+HF_TOKEN=hf_你的寫入權限token tools/convert-qwen3-asr.sh neosophie/Qwen3-ASR-1.7B-JA 你的帳號/Qwen3-ASR-1.7B-JA-ONNX
+```
+
+- 需要 Linux 或 macOS、Python 3.10 以上、約 16GB 記憶體、約 30GB 硬碟；1.7B 在 4 核心 CPU 上約 30～60 分鐘。
+- 流程是 Sokuji 專案發布 `jiangzhuo9357/Qwen3-ASR-1.7B-ONNX` 的步驟（andrewleech/qwen3-asr-onnx 匯出 → Sokuji 的 layout v2 腳本），執行時才 clone 這兩個 repo。另外修正了匯出程式把 prompt 的 system / user 寫成 Llama 3 token id 的錯。
+- 第二個參數填 `-` 就只轉換不上傳。
+- 演練過：在連不到 Hugging Face 的環境，用一個同架構、維度很小、隨機權重的模型（搭配 Qwen 官方 tokenizer）跑完整個腳本，再用擴充功能自己的 `qwen3-asr-core.js` 載入轉出的 q4 / q4f16 跑完辨識流程。真的日文模型還沒轉過。
+- 上傳後，擴充功能的「辨識模型」選「自訂模型」，填上傳的 repo 名稱（名稱要含 `qwen3-asr`）。
+
 ## 函式庫與測試
 - `lib/`：transformers.js 4.3.1（`transformers.min.js`）、onnxruntime-web 1.31.0-dev（`ort.webgpu.min.mjs`，給 Qwen3-ASR 用），以及兩者共用的 `ort-wasm-simd-threaded.asyncify.{mjs,wasm}`。transformers.js 4.x 預設會從 CDN 載入 wasm，MV3 不允許，所以每個 worker 都把 `wasmPaths` 指向本地 `lib/`（路徑統一寫在 `shared.js`）。`transformers.min.js` 有一處手動修改：`"Mistral3ForConditionalGeneration"` 拆成 `"Mistral3For"+"ConditionalGeneration"`，因為 GitHub 密鑰掃描會把原字串誤判成 API Key 擋下 push，升級時要再改一次。
 - `node --test tests/*.test.mjs`：測 Qwen3-ASR 的 log-mel、float16 轉換、prompt、BPE 解碼，以及用假模型（`tests/fixtures/mock-qwen3/`，介面跟真模型相同）跑完整的解碼迴圈。
