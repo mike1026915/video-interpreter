@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { collapseRepeats, dropEchoedContext, videoStartFrom, classifyGap } from '../shared.js';
+import { collapseRepeats, dropEchoedContext, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
 import {
   logMel, buildPromptIds, splitGenerated, makeBpeDecoder, f32ToF16Bits, f16BitsToF32, argmax,
   makeEmbedder, transcribe, stripLanguageTag, loopCut,
@@ -97,6 +97,22 @@ test('時間空白與跳轉', () => {
   assert.equal(classifyGap(seg(10, 14, 0, 4), seg(300, 303, 5, 8)).kind, 'seek');         // 往後拖
   assert.equal(classifyGap(seg(300, 304, 0, 4), seg(20, 23, 5, 8)).kind, 'seek');         // 往回拖
   assert.equal(classifyGap(seg(10, 14, 0, 4), seg(14.2, 17, 30, 33)).kind, 'none');       // 中間暫停了 26 秒
+});
+
+test('自動增益：小聲的影片拉大，大聲的不動，突然變大聲不爆音', () => {
+  const tone = (amp) => Float32Array.from({ length: 1600 }, (_, i) => amp * Math.sin(i / 5));
+  const rms = (f) => Math.sqrt(f.reduce((s, v) => s + v * v, 0) / f.length);
+  const quiet = makeAgc();
+  let f;
+  for (let i = 0; i < 200; i++) f = tone(0.004), quiet.process(f);      // 講話音量只有 0.003 左右
+  assert.ok(Math.abs(quiet.gain - 16) < 0.5, `gain ${quiet.gain}`);         // 想要 ×35，上限 16
+  assert.ok(rms(f) > 0.04);
+  const loud = makeAgc();
+  for (let i = 0; i < 50; i++) f = tone(0.3), loud.process(f);
+  assert.equal(loud.gain, 1);                                             // 正常音量不放大
+  f = tone(0.9);
+  quiet.process(f);                                                       // 小聲之後突然很大聲
+  assert.ok(Math.max(...f.map(Math.abs)) <= 0.99 + 1e-6);
 });
 
 test('byte-level BPE 解碼，略過特殊 token', () => {

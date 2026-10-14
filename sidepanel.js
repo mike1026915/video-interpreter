@@ -1,5 +1,5 @@
 import {
-  isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext, videoStartFrom, classifyGap,
+  makeAgc, isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext, videoStartFrom, classifyGap,
 } from './shared.js';
 
 // ===== 設定 =====
@@ -21,6 +21,7 @@ const CUT_SEARCH_FROM_S = 4;    // 到上限時，只在這個時間點之後找
 const PRE_ROLL_FRAMES = 3;      // 段落開頭往前多帶 0.3 秒，避免吃掉輕聲的字頭
 const TARGET_RMS = 0.1;         // 送辨識前，把說話部分的音量拉到這個程度（只放大，不縮小）
 const MAX_GAIN = 8;             // 最多放大幾倍，避免把底噪放大成人聲
+const INPUT_MAX_GAIN = 16;      // 判斷有沒有人講話之前的自動增益上限（很小聲的影片才會用到，見 shared.js 的 makeAgc）
 const END_SILENCE_S = 0.6;      // 講完停頓 0.6 秒就切段
 const LONG_SEG_S = 6;           // 累積超過 6 秒後，改用較短的停頓就切，避免硬切在字中間
 const LONG_END_SILENCE_S = 0.35;
@@ -743,7 +744,7 @@ function makeSegmenter(inRate, onSegment, onDrop) {
     const sorted = [...recent].sort((a, b) => a - b);
     const noise = sorted[Math.floor(NOISE_PERCENTILE * (sorted.length - 1))];
     threshold = Math.min(MAX_THRESHOLD, Math.max(MIN_THRESHOLD, noise * NOISE_MULT));
-    if (++frameCount % 200 === 0) console.log(`[vad] 底噪 ${noise.toFixed(4)} → 門檻 ${threshold.toFixed(4)}`);
+    if (++frameCount % 200 === 0) console.log(`[vad] 底噪 ${noise.toFixed(4)} → 門檻 ${threshold.toFixed(4)}（自動增益 ×${agc.gain.toFixed(1)}）`);
   }
 
   // 把說話部分的音量拉到 TARGET_RMS 左右（取 90 百分位，不被突波影響）；只放大
@@ -792,7 +793,10 @@ function makeSegmenter(inRate, onSegment, onDrop) {
     for (let i = tailR.length - 1; i >= 0 && !isLoud(tailR[i]); i--) trailingSilent++;
   }
 
+  const agc = makeAgc({ target: TARGET_RMS, maxGain: INPUT_MAX_GAIN });
+
   function onFrame(f) {
+    agc.process(f); // 先把很小聲的影片拉到正常音量，再判斷有沒有人講話
     let sum = 0;
     for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
     const r = Math.sqrt(sum / f.length);

@@ -12,7 +12,7 @@ Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機語音辨�
   - `chrome.tabCapture.getMediaStreamId({targetTabId})` → `getUserMedia({chromeMediaSource:'tab'})`
   - 擷取後分頁會被靜音，所以 `source.connect(ctx.destination)` 把聲音接回喇叭。
   - `capture-worklet.js`（AudioWorklet）把音訊混成單聲道、每 4096 樣本送回主執行緒。
-  - `makeSegmenter`：降取樣到 16kHz，用 100ms 音框的 RMS 判斷停頓切段（3～15 秒）。參數在檔案開頭。
+  - `makeSegmenter`：降取樣到 16kHz，用 100ms 音框的 RMS 判斷停頓切段（3～15 秒）。參數在檔案開頭。判斷之前先經過自動增益（`shared.js` 的 `makeAgc`：最近 10 秒音框音量的 95 百分位拉到 0.1，最多 16 倍，降得快升得慢、峰值限制 0.99），所以很小聲的影片不會整段被當成靜音。
   - 段落排進 queue，依序送 worker 辨識 → 過濾 Whisper 幻覺句 → 翻譯。
   - 自動偵測語言時，Qwen3-ASR 會把自己判斷的語言（ISO 代碼）跟著結果回傳，翻譯就直接用，不再跑 LanguageDetector。
   - 依模型選 worker：模型 ID 含 `qwen3-asr` → `qwen3-asr-worker.js`，其他 → `asr-worker.js`。送給 worker 的語言是 ISO 代碼（`ja`），自動偵測時為 null。
