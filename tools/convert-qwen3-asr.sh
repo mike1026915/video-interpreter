@@ -6,7 +6,7 @@
 #   例：HF_TOKEN=hf_xxx tools/convert-qwen3-asr.sh neosophie/Qwen3-ASR-1.7B-JA 你的帳號/Qwen3-ASR-1.7B-JA-ONNX
 #   上傳到的 repo 填 - 就只轉換、不上傳（結果在 <工作目錄>/qwen3-asr-onnx/output/v2）。
 #
-# 需要：Linux 或 macOS、Python 3.10 以上、git、約 16GB 記憶體、約 30GB 硬碟，能連 huggingface.co、github.com、pypi.org。
+# 需要：Linux 或 macOS、Python 3.10 以上、git、約 16GB 記憶體、約 30GB 硬碟，能連 huggingface.co、*.hf.co（模型檔的下載網域）、github.com、pypi.org。
 # 上傳需要有寫入權限的 Hugging Face token（環境變數 HF_TOKEN，或先 `huggingface-cli login`）。
 # 1.7B 在 4 核心 CPU 上大約 30～60 分鐘（大部分是下載和匯出 encoder / decoder）。
 #
