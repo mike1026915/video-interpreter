@@ -66,18 +66,37 @@ export QWEN3_ASR_ONNX_DIR=$P PY
 V1=$P/output/v1
 V2=$P/output/v2
 cd "$P"
-log "1/8 匯出 FP32 ONNX（會先從 Hugging Face 下載 $SRC）"
-[ -f "$V1/decoder_step.onnx" ] || "$PY" export.py --model "$SRC" --output "$V1"
+# 記憶體 / 硬碟很緊時（15GB / 30GB）的做法，1.7B 實測過：
+# - export.py 不帶 --skip-encoder 會連 v1 的 decoder 一起匯出（v2 會重新匯出，用不到），
+#   而且匯出完會 onnx.load 約 7GB 的外部資料，在 15GB 的機器上 OOM；所以 v1 只匯出 encoder，
+#   嵌入表 / tokenizer / config 由 export-v1-meta.py 另外產生。
+# - export_v2 用空的 --src（不複製），結束後把 v1 的檔案「搬」進 v2，省約 2.5GB。
+# - Hugging Face 快取（約 4GB）在 export_v2 之後就沒用了，刪掉。
+log "1/8 匯出 FP32 encoder 與中繼檔（會先從 Hugging Face 下載 $SRC）"
+[ -f "$V1/encoder.onnx" ] || "$PY" export.py --model "$SRC" --output "$V1" --skip-decoder
+[ -f "$V1/embed_tokens.bin" ] || "$PY" "$HERE/export-v1-meta.py" "$SRC" "$V1"
 log "2/8 原生 fp16 encoder（給有 shader-f16 的顯示卡）"
 [ -f "$V1/encoder.fp16.onnx" ] || "$PY" export_encoder_native_fp16.py --model "$SRC" --output "$V1/encoder.fp16.onnx" --verify
 log "3/8 layout v2：prefill 改吃 input_embeds，模型裡不放嵌入表"
-"$PY" "$B/export_v2/export_v2.py" --model "$SRC" --src "$V1" --out "$V2"
+EMPTY=$(mktemp -d)
+"$PY" "$B/export_v2/export_v2.py" --model "$SRC" --src "$EMPTY" --out "$V2"
+rmdir "$EMPTY"
+mv "$V1"/* "$V2"/ && rmdir "$V1"
+rm -rf "${HF_HOME:-$HOME/.cache/huggingface}/hub/models--${SRC//\//--}"
 log "4/8 圖最佳化（RMSNorm / encoder 融合）"
 "$PY" optimize_graphs.py --input "$V2"
 log "5/8 int8 嵌入表"
 "$PY" "$B/export_v2/embed_int8.py" "$V2"
+rm -f "$V2/embed_tokens.bin"
 log "6/8 int4 decoder"
-bash "$B/export_v2/quantize_v2.sh" "$V2"
+# quantize_v2.sh 在同一個 process 量化兩個 decoder，第二個載入時會 OOM（15GB）：分兩個 process 跑，
+# 再做它剩下的 share_weights（兩個 decoder 共用一份權重檔）。FP32 decoder 量化完就刪（各約 7GB）。
+for d in decoder_init decoder_step; do
+  "$PY" quantize_nbits.py --input "$V2" --output "$V2" --bits 4 --block-size 32 --accuracy-level 4 --decoders $d 2>&1 \
+    | grep -v 'Progress:' | tail -3
+done
+rm -f "$V2"/decoder_init.onnx* "$V2"/decoder_step.onnx*
+"$PY" share_weights.py "$V2" --suffix int4 --verify 2>&1 | tail -12
 log "7/8 q4f16 decoder"
 bash "$B/export_v2/q4f16_v2.sh" "$V2"
 log "8/8 mel filters、vocab.json / added_tokens.json、prompt_config.json"
