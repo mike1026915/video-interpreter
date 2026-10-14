@@ -92,6 +92,30 @@ export function makeAgc({ target = 0.1, maxGain = 16, windowFrames = 100, rise =
   };
 }
 
+// ===== 人聲的週期性 =====
+// 有聲的說話（母音）是週期性的：基頻 70～400Hz，波形每隔一個基頻週期就重複一次。
+// 底噪、風聲、雜音沒有這種重複。回傳 0～1：音框在這個範圍內最像「隔一段時間重複」的程度（正規化自相關的最大值）。
+// 小聲說話跟背景差不多大時，光看音量分不出來，靠這個補判。
+export function periodicity(frame, sr = 16000, minHz = 70, maxHz = 400) {
+  const n = Math.min(frame.length, 800); // 50ms 就夠看出週期，省一半計算
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += frame[i];
+  mean /= n;
+  const x = new Float32Array(n);
+  for (let i = 0; i < n; i++) x[i] = frame[i] - mean;
+  const minLag = Math.floor(sr / maxHz), maxLag = Math.ceil(sr / minHz);
+  let best = 0;
+  for (let lag = minLag; lag <= maxLag && lag < n / 2; lag++) {
+    let xy = 0, xx = 0, yy = 0;
+    for (let i = 0; i + lag < n; i++) {
+      const a = x[i], b = x[i + lag];
+      xy += a * b; xx += a * a; yy += b * b;
+    }
+    if (xx > 0 && yy > 0) best = Math.max(best, xy / Math.sqrt(xx * yy));
+  }
+  return best;
+}
+
 // ===== 影片時間 =====
 // read：從影片分頁讀到的 { t: currentTime, at: 讀取當下的 Date.now(), paused, rate }
 // flushWall：切段當下的 Date.now()；backS：這段的開頭在切段當下之前幾秒（擷取時間）

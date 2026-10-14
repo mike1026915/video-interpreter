@@ -1,5 +1,5 @@
 import {
-  makeAgc, isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext, dropPromptEcho, suspiciousContextOutput, videoStartFrom, classifyGap,
+  makeAgc, periodicity, isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext, dropPromptEcho, suspiciousContextOutput, videoStartFrom, classifyGap,
 } from './shared.js';
 
 // ===== 設定 =====
@@ -12,6 +12,11 @@ const SILENCE_RMS = 0.008;      // 底噪還沒估出來前（開頭約 1 秒）
 const NOISE_WINDOW_FRAMES = 100; // 往回看 10 秒
 const NOISE_PERCENTILE = 0.1;    // 取最安靜的 10% 當底噪（說話中的換氣、字間空隙）
 const NOISE_MULT = 2;
+// 音量沒到門檻、但超過底噪 × SOFT_NOISE_MULT，而且聲音有人聲的週期性（有音高），也算有人講話：
+// 小聲說話跟背景音差不多大時才抓得到，又不會把起伏的雜音當成講話（見 shared.js 的 periodicity）
+const SOFT_NOISE_MULT = 1.25;
+const VOICED_PERIODICITY = 0.6;
+const MUSIC_PERIODICITY = 0.45;  // 背景（底噪附近的音框）平均週期性超過這個值，代表背景是音樂，有音高不代表有人講話：不補判
 const NOISE_WARMUP_FRAMES = 10;  // 累積這麼多音框（1 秒）後才開始用估計值
 const MIN_THRESHOLD = 0.003;
 const MAX_THRESHOLD = 0.03;      // 上限：收音很小聲時，不要讓門檻高到把人聲也蓋掉
@@ -739,6 +744,9 @@ function makeSegmenter(inRate, onSegment, onDrop) {
   let segGapPeak = 0;             // 目前這段開始前那段空白的 gapPeak
 
   let threshold = SILENCE_RMS;    // 目前的有聲音門檻（隨底噪調整）
+  let softThreshold = SILENCE_RMS; // 低於門檻、但有音高時的門檻
+  let softVoiced = 0;             // 靠音高補判成有聲音的音框數（log 用）
+  let bgPeriodicity = 1;          // 背景音框的平均週期性；一開始當成音樂，確認背景不是音樂之後才補判
   const recent = [];              // 最近幾個音框的音量，用來估底噪
   let frameCount = 0;
   const isLoud = (r) => r > threshold;
@@ -750,7 +758,8 @@ function makeSegmenter(inRate, onSegment, onDrop) {
     const sorted = [...recent].sort((a, b) => a - b);
     const noise = sorted[Math.floor(NOISE_PERCENTILE * (sorted.length - 1))];
     threshold = Math.min(MAX_THRESHOLD, Math.max(MIN_THRESHOLD, noise * NOISE_MULT));
-    if (++frameCount % 200 === 0) console.log(`[vad] 底噪 ${noise.toFixed(4)} → 門檻 ${threshold.toFixed(4)}（自動增益 ×${agc.gain.toFixed(1)}）`);
+    softThreshold = Math.min(threshold, Math.max(MIN_THRESHOLD, noise * SOFT_NOISE_MULT));
+    if (++frameCount % 200 === 0) console.log(`[vad] 底噪 ${noise.toFixed(4)} → 門檻 ${threshold.toFixed(4)}（自動增益 ×${agc.gain.toFixed(1)}；背景週期性 ${bgPeriodicity.toFixed(2)}${bgPeriodicity < MUSIC_PERIODICITY ? '' : '（像音樂，不補判）'}，靠音高補判 ${softVoiced} 個音框）`);
   }
 
   // 把說話部分的音量拉到 TARGET_RMS 左右（取 90 百分位，不被突波影響）；只放大
@@ -805,8 +814,17 @@ function makeSegmenter(inRate, onSegment, onDrop) {
     agc.process(f); // 先把很小聲的影片拉到正常音量，再判斷有沒有人講話
     let sum = 0;
     for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
-    const r = Math.sqrt(sum / f.length);
+    let r = Math.sqrt(sum / f.length);
     updateThreshold(r);
+    // 沒到門檻但有人聲的音高：當成剛好超過門檻（這個值也用來算送辨識前要放大幾倍）
+    if (r <= threshold) {
+      const p = periodicity(f, SR);
+      if (r <= softThreshold) bgPeriodicity += (p - bgPeriodicity) * 0.05; // 背景：約 2 秒的移動平均
+      else if (p >= VOICED_PERIODICITY && bgPeriodicity < MUSIC_PERIODICITY) {
+        r = threshold * 1.01;
+        softVoiced++;
+      }
+    }
     const loud = isLoud(r);
     quiet = loud ? 0 : quiet + 1;
 
