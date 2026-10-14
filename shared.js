@@ -68,14 +68,25 @@ export function dropHangul(text, source) {
   return splitSentences(text).filter((s) => !HANGUL.test(s)).join('').trim();
 }
 
-// Qwen3-ASR 帶前文當背景資訊時，聽不清楚的地方偶爾會直接照抄前文。
-// 辨識結果裡有一句（6 個字以上；「ありがとう」這種短句可能真的又說了一次）跟前文的某一句幾乎一樣，就當成照抄（呼叫端會不帶前文重新辨識）
-export function echoesContext(text, recent) {
-  const prev = recent.flatMap(splitSentences).map((s) => s.replace(PUNCT, '')).filter((s) => s.length >= 6);
-  if (!prev.length) return false;
+// Qwen3-ASR 帶背景資訊時，聽不清楚的地方偶爾會直接照抄：前 2 段辨識結果（recent），
+// 或使用者填的背景資訊、影片標題（fixed；可能是別的語言，例如中文敘述被複述成日文）。
+// 辨識結果裡有一句（6 個字以上；「ありがとう」這種短句可能真的又說了一次）符合下面任一條就當成照抄（呼叫端會不帶背景資訊重新辨識）：
+//  - 跟前文或 fixed 的某一小段幾乎一樣（包含或雙字組相似度 ≥ 0.8）
+//  - 對 fixed：句子裡非平假名的字（漢字、片假名、英數）至少 6 個，而且 90% 以上都出現在 fixed 裡
+//    （只拿 6 個字以上的敘述片段來比，短關鍵字不算；所以講出關鍵字、甚至兩個關鍵字湊一句都不會誤判）
+const KANA_HIRA = /[\u3040-\u309f]/g;
+export function echoesContext(text, recent = [], fixed = '') {
+  const norm = (s) => s.replace(PUNCT, '');
+  const prev = recent.flatMap(splitSentences).map(norm).filter((s) => s.length >= 6);
+  const fixedParts = fixed ? fixed.split(/[\s。！？!?…、，,]+/).map(norm).filter((s) => s.length >= 6) : [];
+  const fixedChars = new Set(fixedParts.join('').replace(KANA_HIRA, ''));   // 短關鍵字（人名、作品名）不算進來
+  const like = (n, list) => list.some((p) => p.includes(n) || n.includes(p) || dice(n, p) >= 0.8);
   return splitSentences(text).some((s) => {
-    const n = s.replace(PUNCT, '');
-    return n.length >= 6 && prev.some((p) => p.includes(n) || n.includes(p) || dice(n, p) >= 0.8);
+    const n = norm(s);
+    if (n.length < 6) return false;
+    if (like(n, prev) || like(n, fixedParts)) return true;
+    const content = [...n.replace(KANA_HIRA, '')];
+    return content.length >= 6 && content.filter((c) => fixedChars.has(c)).length / content.length >= 0.9;
   });
 }
 
