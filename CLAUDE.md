@@ -16,7 +16,7 @@ Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機語音辨�
   - 段落排進 queue，依序送 worker 辨識 → 過濾 Whisper 幻覺句 → 翻譯。
   - `prompt_config.json` 的 prefix_ids 把 system / user 寫成 9125 / 882（Llama 3 的 id，Qwen 詞表裡是「 Current」「 time」，源頭是 andrewleech/qwen3-asr-onnx 的 `src/prompt.py`）：worker 載入時用 `fixRoleTokens` 把 `<|im_start|>` 後面的 token 換成編碼後的「system」「user」（8948 / 872）。
   - Qwen3-ASR 辨識時帶背景資訊（使用者填的關鍵字 + 影片分頁標題 + 前 2 段辨識結果），插在 prompt 的 system 訊息（`buildPromptIds` 的 contextIds，放在 prefix 裡第一個 eos id 也就是 `<|im_end|>` 前面）。文字轉 token 用 `makeBpeEncoder`：Qwen 的 BPE 來自 tiktoken，合併優先順序 = 合併後 token 的 id，所以只要 vocab.json；已跟官方 tokenizer 逐 token 比對。結果照抄前文（`shared.js` 的 `echoesContext`）時不帶背景資訊重新辨識。跳轉、清除、重新開始時清掉前文。
-  - 使用者填的背景資訊如果是中文（`LanguageDetector` 判斷），辨識前用 Chrome 內建 Translator 翻成影片語言（`localizeContext`，繁中 → 日文等；原文語言選自動偵測時，用上一段辨識出的語言，第一段之前用原文）。翻譯模型要使用者點擊才能下載，所以「開始」時先觸發；還沒下載好、不支援或翻失敗就用原文。影片標題不翻。
+  - 側欄勾選「背景資訊是中文時先翻成影片語言」（預設關）時，使用者填的背景資訊如果是中文（`LanguageDetector` 判斷），辨識前用 Chrome 內建 Translator 翻成影片語言（`localizeContext`，繁中 → 日文等；原文語言選自動偵測時，用上一段辨識出的語言，第一段之前用原文）。翻譯模型要使用者點擊才能下載，所以「開始」時先觸發；還沒下載好、不支援或翻失敗就用原文。影片標題不翻。預設關的原因：機器翻譯的用字常跟實際講的不同（實測「前輩」→「シニア」、「後輩」→「ジュニア」），專有名詞可能反而帶偏模型，建議直接填原文語言的關鍵字。
   - 自動偵測語言時，Qwen3-ASR 會把自己判斷的語言（ISO 代碼）跟著結果回傳，翻譯就直接用，不再跑 LanguageDetector。
   - 依模型選 worker：模型 ID 含 `qwen3-asr` → `qwen3-asr-worker.js`，其他 → `asr-worker.js`。送給 worker 的語言是 ISO 代碼（`ja`），自動偵測時為 null。
   - 沒選過模型時：有 WebGPU 預設 large-v3-turbo，沒有就 small。

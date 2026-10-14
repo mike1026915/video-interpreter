@@ -23,6 +23,9 @@ header { padding: 12px; border-bottom: 1px solid var(--line); display: grid; gap
 label { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; font-size: 12px; color: var(--muted); flex: 1; min-width: 120px; }
 /* 選項文字很長：下拉選單不能撐開欄位，否則會蓋到旁邊的選單（選單收起時文字截掉，展開時看得到全文） */
 label > select, label > input { width: 100%; min-width: 0; text-overflow: ellipsis; }
+/* 勾選框：框在左、說明文字在右，整列佔滿 */
+label.check { display: flex; align-items: flex-start; gap: 6px; flex: 1 1 100%; line-height: 1.5; }
+label.check > input { width: auto; flex: none; margin: 3px 0 0; }
 /* 四個設定：側欄夠寬排一列，窄的時候自動換成兩欄或一欄 */
 .row.settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 .row.settings label { min-width: 0; }
