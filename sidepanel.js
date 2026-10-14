@@ -34,6 +34,7 @@ const END_SILENCE_S = 0.6;      // 講完停頓 0.6 秒就切段
 const LONG_SEG_S = 6;           // 累積超過 6 秒後，改用較短的停頓就切，避免硬切在字中間
 const LONG_END_SILENCE_S = 0.35;
 const MIN_VOICED_S = 0.3;       // 有聲音的部分不到 0.3 秒就丟掉（避免 Whisper 對靜音亂講；太高會吃掉「はい」這類短回應）
+const MIN_PITCHED_VOICED_S = 0.2; // 有聲音的部分 0.2～0.3 秒、但有人聲的音高（「え？」、被笑聲隔開的句尾）也送去辨識；碰撞聲、雜音沒有音高，照樣丟掉
 const MIN_NOTE_VOICED_S = 0.15; // 被丟掉的段落若有聲音部分超過這個長度，就在畫面上留一行提示
 const GAP_QUIET_RATIO = 0.5;    // 空白期間最大音量超過門檻的這個比例，就提示「可能有小聲說話被當成靜音」
 
@@ -777,7 +778,9 @@ function makeSegmenter(inRate, onSegment, onDrop) {
   function flush() {
     // end：這段結束的擷取時間；now：目前擷取到的時間；gapPeak：這段之前的空白裡，最大音量是門檻的幾倍
     const info = { end: segStart + frames.length / 10, now: totalOut / SR, gapPeak: segGapPeak };
-    if (frames.length && voiced * 0.1 >= MIN_VOICED_S) {
+    // 有聲音的部分很短時，至少要有一個音框有人聲的音高才送
+    const pitched = () => frames.some((f, i) => isLoud(rmsArr[i]) && periodicity(f, SR) >= VOICED_PERIODICITY);
+    if (frames.length && (voiced * 0.1 >= MIN_VOICED_S || (voiced * 0.1 >= MIN_PITCHED_VOICED_S && pitched()))) {
       const g = gainFor();
       const audio = new Float32Array(frames.length * FRAME);
       frames.forEach((f, i) => audio.set(f, i * FRAME));
