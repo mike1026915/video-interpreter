@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { echoesContext, periodicity, collapseRepeats, dropEchoedContext, dropPromptEcho, dropHangul, suspiciousContextOutput, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
+import { dropOverlap, echoesContext, periodicity, collapseRepeats, dropEchoedContext, dropPromptEcho, dropHangul, suspiciousContextOutput, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
 import {
   logMel, buildPromptIds, splitGenerated, makeBpeDecoder, f32ToF16Bits, f16BitsToF32, argmax,
   makeEmbedder, transcribe, stripLanguageTag, loopCut, makeBpeEncoder,
@@ -230,4 +230,13 @@ test('辨識結果照抄前文時偵測得到', () => {
   assert.equal(echoesContext('じゃあビール飲みますね。', recent), true);
   assert.equal(echoesContext('そうか。そこがまずいことって。', recent), false);
   assert.equal(echoesContext('ありがとう。', recent), false); // 5 個字：可能真的又說了一次
+});
+
+test('重疊部分重複辨識的字刪掉', () => {
+  assert.equal(dropOverlap('ビール飲みたいんだけど', 'けど、やっぱりやめとく。'), 'やっぱりやめとく。');
+  assert.equal(dropOverlap('そういうことなんですよね。', 'よね。まあいいや。'), 'まあいいや。');
+  assert.equal(dropOverlap('今日はいい天気', 'です。'), 'です。');          // 沒有重複
+  assert.equal(dropOverlap('あ', 'あ、そうですね。'), 'あ、そうですね。');   // 1 個字的巧合不刪
+  assert.equal(dropOverlap('ですね', 'ですね'), 'ですね');                   // 全部重複時保留原樣
+  assert.equal(dropOverlap('', 'こんにちは'), 'こんにちは');
 });
