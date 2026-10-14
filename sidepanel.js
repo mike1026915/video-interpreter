@@ -1,5 +1,5 @@
 import {
-  makeAgc, isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext, videoStartFrom, classifyGap,
+  makeAgc, isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext, dropPromptEcho, suspiciousContextOutput, videoStartFrom, classifyGap,
 } from './shared.js';
 
 // ===== 設定 =====
@@ -328,8 +328,14 @@ async function translateUnit(unit, src, tr) {
       const context = mtContext.join('\n');
       mtContext.push(unit.text);
       if (mtContext.length > MT_CONTEXT_SENTENCES) mtContext.shift();
-      const raw = await mtTranslate(unit.text, context);
-      const zh = dropEchoedContext(raw, mtRecentZh);
+      let raw = await mtTranslate(unit.text, context);
+      if (context && suspiciousContextOutput(unit.text, raw)) {
+        // 把提示詞或上下文翻進來了：這句不帶上下文重翻
+        const retry = await mtTranslate(unit.text, '');
+        console.log('[mt] 帶上下文的譯文可疑，不帶上下文重翻', { raw, retry });
+        raw = retry;
+      }
+      const zh = dropEchoedContext(dropPromptEcho(raw) || raw, mtRecentZh);
       if (zh !== raw) console.log('[mt] 刪掉重翻的上下文', { raw, zh });
       mtRecentZh.push(zh);
       if (mtRecentZh.length > MT_CONTEXT_SENTENCES) mtRecentZh.shift();

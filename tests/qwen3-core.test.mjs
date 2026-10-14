@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { collapseRepeats, dropEchoedContext, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
+import { collapseRepeats, dropEchoedContext, dropPromptEcho, suspiciousContextOutput, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
 import {
   logMel, buildPromptIds, splitGenerated, makeBpeDecoder, f32ToF16Bits, f16BitsToF32, argmax,
   makeEmbedder, transcribe, stripLanguageTag, loopCut,
@@ -162,3 +162,13 @@ for (const f16 of [false, true]) {
     assert.equal(cut.text, '');
   });
 }
+
+test('HY-MT 輸出提示詞或多翻上下文時判定為可疑', () => {
+  assert.equal(dropPromptEcho('啊，是的。參考上述的信息，將下面的文本翻譯成中文吧。'), '啊，是的。');
+  assert.equal(dropPromptEcho('這本書翻譯得很好。'), '這本書翻譯得很好。');
+  assert.equal(suspiciousContextOutput('あ、そうですね。', '啊，是的。參考上述的信息，將下面的文本翻譯成中文吧。'), true);
+  assert.equal(suspiciousContextOutput('せなここうちここうちの近くの工業団体を。', '嗯，對了。那麼，我們再稍微出一份吧。以練習為目的吧。'), true);
+  assert.equal(suspiciousContextOutput('もうちょっと、出しましょう。練習で。', '再試一下吧。用來練習的。'), false);
+  assert.equal(suspiciousContextOutput('まあ雨披露、確かにやってるんですね。まあ雨やめないと。それでよかった嬉しい。',
+    '嗯，下雨的時候，確實是這樣做的呢。唉，希望雨能停止吧。那樣的話就太好了，真令人高興啊。'), false);
+});
