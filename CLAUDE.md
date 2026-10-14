@@ -43,7 +43,7 @@ Chrome MV3 擴充功能：擷取目前分頁的影片聲音 → 本機語音辨�
 - 量化模型遇到模糊音訊會卡在重複迴圈（例如「もう、もう、…」）：Qwen3-ASR 解碼時偵測到結尾同一段重複 4 次就停（`loopCut`），Whisper 不論 beam 或貪婪都帶 `no_repeat_ngram_size`，側欄再把連續重複 4 次以上的片段收斂成 2 次（`shared.js` 的 `collapseRepeats`）。
 
 ## 可能的改進方向
-- Qwen3-ASR 的日文微調版（neosophie/Qwen3-ASR-1.7B-JA、jaykwok 的 Galgame 版）沒有現成的 layout v2 ONNX，要自己用 Sokuji 公開的匯出流程轉。
+- Qwen3-ASR 的日文微調版（neosophie/Qwen3-ASR-1.7B-JA、jaykwok 的 Galgame 版）沒有現成的 layout v2 ONNX：`tools/convert-qwen3-asr.sh` 會轉換並上傳到使用者自己的 HF 帳號。這個開發環境連不到 huggingface.co，只用同架構的小型隨機權重模型演練過整個流程（轉出的 q4 / q4f16 能用 qwen3-asr-core.js 跑完）。注意：onnx / onnxruntime 要用 1.22 / 1.29（Sokuji 發布時的版本），較新版會讓 q4f16 的 dedupe 步驟產生壞掉的圖；qwen-asr 要 `--no-deps` 安裝（nagisa 在新版 Python 裝不起來，用空模組佔位）；匯出程式只留 tokenizer.json，vocab.json / added_tokens.json 由腳本產生。
 - Chrome 的 Prompt API（Gemini Nano）文件列的輸出語言沒有中文，不適合拿來翻繁中。
 - 只有 CPU 的電腦：可試 Moonshine 日文版（`wmoto-ai/moonshine-tiny-ja-ONNX`）或 Chrome 內建離線語音辨識（Web Speech API 的 `processLocally` + `start(audioTrack)`）。
 - 逐字稿存到 chrome.storage，關掉側欄不會消失。
