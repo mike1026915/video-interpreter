@@ -20,6 +20,9 @@ const MUSIC_PERIODICITY = 0.45;  // 背景（底噪附近的音框）平均週�
 const NOISE_WARMUP_FRAMES = 10;  // 累積這麼多音框（1 秒）後才開始用估計值
 const MIN_THRESHOLD = 0.003;
 const MAX_THRESHOLD = 0.03;      // 上限：收音很小聲時，不要讓門檻高到把人聲也蓋掉
+// 底噪本身就超過上限時（BGM、環境音很大聲），上限改成底噪 × HIGH_FLOOR_MULT：
+// 門檻至少要比底噪高一點，不然所有聲音都算「有人講話」，段落只能等到 8 秒硬切，常切在句子中間
+const HIGH_FLOOR_MULT = 1.4;
 const MIN_SEG_S = 3;            // 一段至少 3 秒才切（太短會把一句話拆開，翻譯失去上下文）
 const MAX_SEG_S = 8;            // 累積到 8 秒還沒遇到停頓，就在最安靜的地方切（快語速也不會一段塞太多字）
 const CUT_SEARCH_FROM_S = 4;    // 到上限時，只在這個時間點之後找最安靜的音框來切
@@ -758,7 +761,7 @@ function makeSegmenter(inRate, onSegment, onDrop) {
     if (recent.length < NOISE_WARMUP_FRAMES) return;
     const sorted = [...recent].sort((a, b) => a - b);
     const noise = sorted[Math.floor(NOISE_PERCENTILE * (sorted.length - 1))];
-    threshold = Math.min(MAX_THRESHOLD, Math.max(MIN_THRESHOLD, noise * NOISE_MULT));
+    threshold = Math.min(Math.max(MAX_THRESHOLD, noise * HIGH_FLOOR_MULT), Math.max(MIN_THRESHOLD, noise * NOISE_MULT));
     softThreshold = Math.min(threshold, Math.max(MIN_THRESHOLD, noise * SOFT_NOISE_MULT));
     if (++frameCount % 200 === 0) console.log(`[vad] 底噪 ${noise.toFixed(4)} → 門檻 ${threshold.toFixed(4)}（自動增益 ×${agc.gain.toFixed(1)}；背景週期性 ${bgPeriodicity.toFixed(2)}${bgPeriodicity < MUSIC_PERIODICITY ? '' : '（像音樂，不補判）'}，靠音高補判 ${softVoiced} 個音框）`);
   }
