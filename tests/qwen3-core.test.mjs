@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { collapseRepeats, dropEchoedContext, dropPromptEcho, suspiciousContextOutput, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
+import { periodicity, collapseRepeats, dropEchoedContext, dropPromptEcho, suspiciousContextOutput, videoStartFrom, classifyGap, makeAgc } from '../shared.js';
 import {
   logMel, buildPromptIds, splitGenerated, makeBpeDecoder, f32ToF16Bits, f16BitsToF32, argmax,
   makeEmbedder, transcribe, stripLanguageTag, loopCut,
@@ -171,4 +171,18 @@ test('HY-MT 輸出提示詞或多翻上下文時判定為可疑', () => {
   assert.equal(suspiciousContextOutput('もうちょっと、出しましょう。練習で。', '再試一下吧。用來練習的。'), false);
   assert.equal(suspiciousContextOutput('まあ雨披露、確かにやってるんですね。まあ雨やめないと。それでよかった嬉しい。',
     '嗯，下雨的時候，確實是這樣做的呢。唉，希望雨能停止吧。那樣的話就太好了，真令人高興啊。'), false);
+});
+
+test('periodicity：有音高的聲音接近 1，雜音很低', () => {
+  const voice = new Float32Array(1600), noise = new Float32Array(1600);
+  let seed = 3; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647 - 0.5);
+  for (let i = 0; i < 1600; i++) {
+    const t = i / 16000;
+    for (let h = 1; h <= 10; h++) voice[i] += Math.sin(2 * Math.PI * 160 * h * t) / h;
+    voice[i] += 0.3 * rnd();
+    noise[i] = rnd();
+  }
+  assert.ok(periodicity(voice) > 0.8, `voice ${periodicity(voice)}`);
+  assert.ok(periodicity(noise) < 0.3, `noise ${periodicity(noise)}`);
+  assert.equal(periodicity(new Float32Array(1600)), 0);
 });
