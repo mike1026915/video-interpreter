@@ -43,6 +43,12 @@
         </select>
       </label>
     </div>
+    <div class="row" id="contextRow" hidden>
+      <label>背景資訊（Qwen3-ASR 辨識時參考：人名、作品名、常出現的用語，用頓號或空格隔開，可留空）
+        <input id="asrContext" type="text" spellcheck="false" autocomplete="off"
+               placeholder="例如：ホロライブ、宝鐘マリン、スパチャ">
+      </label>
+    </div>
     <div class="row" id="customRow" hidden>
       <label>自訂模型 ID（Transformers.js 能載入的 ONNX 版 Whisper，或 Qwen3-ASR layout v2 的 ONNX）
         <input id="customModel" type="text" spellcheck="false" autocomplete="off"

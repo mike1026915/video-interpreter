@@ -53,6 +53,7 @@ const HALLUCINATIONS = [
 const $ = (id) => document.getElementById(id);
 const els = {
   srcLang: $('srcLang'), model: $('model'), customModel: $('customModel'), customRow: $('customRow'),
+  asrContext: $('asrContext'), contextRow: $('contextRow'),
   mode: $('mode'), engine: $('engine'), start: $('startBtn'), stop: $('stopBtn'),
   exp: $('exportBtn'), clear: $('clearBtn'), status: $('status'), progress: $('progress'),
   dl: $('dlTranslatorBtn'), list: $('list'),
@@ -64,10 +65,15 @@ function setStatus(text, isErr = false) {
 }
 
 // ===== 設定記憶 =====
-function showCustomRow() { els.customRow.hidden = els.model.value !== 'custom'; }
+function showCustomRow() {
+  els.customRow.hidden = els.model.value !== 'custom';
+  // 背景資訊只有 Qwen3-ASR 會用
+  els.contextRow.hidden = !isQwen3Asr(els.model.value === 'custom' ? els.customModel.value : els.model.value);
+}
 
 let modelPicked = false;          // 使用者在這次開側欄後自己選過模型：不要再套用預設值
-chrome.storage.local.get(['srcLang', 'model', 'customModel', 'mode', 'engine']).then(async (s) => {
+chrome.storage.local.get(['srcLang', 'model', 'customModel', 'mode', 'engine', 'asrContext']).then(async (s) => {
+  if (s.asrContext) els.asrContext.value = s.asrContext;
   if (s.srcLang) els.srcLang.value = s.srcLang;
   if (s.customModel) els.customModel.value = s.customModel;
   if (s.mode) els.mode.value = s.mode;
@@ -87,7 +93,8 @@ els.model.onchange = () => {
   chrome.storage.local.set({ model: els.model.value });
   showCustomRow();
 };
-els.customModel.onchange = () => chrome.storage.local.set({ customModel: els.customModel.value.trim() });
+els.customModel.onchange = () => { chrome.storage.local.set({ customModel: els.customModel.value.trim() }); showCustomRow(); };
+els.asrContext.onchange = () => chrome.storage.local.set({ asrContext: els.asrContext.value.trim() });
 
 // 回傳要載入的模型 ID；自訂模型格式不對時丟出錯誤
 function getModel() {
@@ -195,14 +202,26 @@ function loadModel(model) {
 }
 
 let asrSeq = 0;
-// lang：ISO 代碼（ja、en…），自動偵測時為 null
-function transcribe(audio, lang) {
+// lang：ISO 代碼（ja、en…），自動偵測時為 null；context：背景資訊（只有 Qwen3-ASR 會用）
+function transcribe(audio, lang, context) {
   const id = ++asrSeq;
   return new Promise((resolve, reject) => {
     pendingAsr.set(id, { resolve, reject });
-    worker.postMessage({ type: 'transcribe', id, audio, lang }, [audio.buffer]);
+    worker.postMessage({ type: 'transcribe', id, audio, lang, context }, [audio.buffer]);
   });
 }
+
+// ===== 辨識的背景資訊（Qwen3-ASR）=====
+// 使用者填的關鍵字＋影片標題＋前 ASR_CONTEXT_SENTENCES 段辨識結果。前後文讓同音詞、專有名詞比較容易辨識對。
+const ASR_CONTEXT_SENTENCES = 2;
+const asrRecent = [];             // 最近幾段辨識結果（原文）
+let videoTitle = '';
+function asrContext() {
+  const fixed = [els.asrContext.value.trim(), videoTitle].filter(Boolean).join('\n');
+  return { fixed, recent: [...asrRecent] };
+}
+// 影片分頁標題去掉網站名稱（「… - YouTube」）
+const cleanTitle = (t) => (t || '').replace(/\s*[-|–—]\s*(YouTube|ニコニコ動画|Twitch|bilibili|哔哩哔哩.*)$/i, '').replace(/^\(\d+\)\s*/, '').trim();
 
 // ===== HY-MT1.5 翻譯 worker =====
 let mtWorker = null;
@@ -472,6 +491,7 @@ function noteGap(times, gapPeak) {
     flushGroup();
     mtContext.length = 0;
     mtRecentZh.length = 0;
+    asrRecent.length = 0;
     addSkipNote(null, `↪ 影片跳到 ${fmtTime(times.start)}`, 'seek');
   } else if (g.kind === 'gap') {
     const hint = gapPeak >= GAP_QUIET_RATIO
@@ -589,7 +609,7 @@ function enqueueSegment(audio, cap0, srcSetting, info) {
     noteGap(times, info.gapPeak);
     try {
       const tStart = performance.now();
-      const res = await transcribe(audio, srcSetting === 'auto' ? null : srcSetting);
+      const res = await transcribe(audio, srcSetting === 'auto' ? null : srcSetting, asrContext());
       const { lang } = res;
       const text = collapseRepeats(res.text);
       if (text !== res.text) console.log('[asr] 收斂重複片段', res.text.length, '→', text.length, '字');
@@ -602,6 +622,8 @@ function enqueueSegment(audio, cap0, srcSetting, info) {
         addSkipNote(t0, `略過：被當成幻覺濾掉「${text}」`);
         return;
       }
+      asrRecent.push(text);
+      if (asrRecent.length > ASR_CONTEXT_SENTENCES) asrRecent.shift();
       const entry = addEntry(t0, text, { audioS, waitMs: Math.round(tStart - tEnq), asrMs });
       entry.lang = lang; // 辨識模型自己判斷的語言（Qwen3-ASR 自動偵測時才有）
       entry.showTiming();
@@ -650,6 +672,7 @@ async function start() {
     try {
       streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
       videoTabId = tab.id;
+      videoTitle = cleanTitle(tab.title);
     } catch (err) {
       throw new Error('無法擷取這個分頁的聲音。請在影片分頁上「再點一次工具列的擴充功能圖示」，然後再按開始。（' + err.message + '）');
     }
@@ -668,6 +691,7 @@ async function start() {
 
     let mtNote = '';
     mtContext.length = 0; // 不要把上一部影片的句子當成這次的上下文
+    asrRecent.length = 0;
     mtRecentZh.length = 0;
     if (engine !== 'hymt' || srcSetting === 'zh') unloadMt();
     if (engine === 'hymt' && srcSetting !== 'zh') {
@@ -892,7 +916,7 @@ function makeSegmenter(inRate, onSegment, onDrop) {
 // ===== 按鈕 =====
 els.start.onclick = start;
 els.stop.onclick = stop;
-els.clear.onclick = () => { prevSeg = null; transcript.length = 0; mtContext.length = 0; mtRecentZh.length = 0; resetGroup(); showEmpty(); };
+els.clear.onclick = () => { prevSeg = null; transcript.length = 0; mtContext.length = 0; mtRecentZh.length = 0; asrRecent.length = 0; resetGroup(); showEmpty(); };
 els.exp.onclick = () => {
   if (!transcript.length) return;
   const text = transcript.map((e) => `[${fmtTime(e.t0)}]\n${e.text}\n${e.zh ? e.zh + '\n' : ''}`).join('\n');
