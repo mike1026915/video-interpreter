@@ -177,6 +177,21 @@ export function makeBpeDecoder(vocab, added = {}) {
   };
 }
 
+// prompt_config.json 的 prefix 裡，<|im_start|> 後面的角色名稱應該是「system」「user」。
+// 但 jiangzhuo9357/Qwen3-ASR-*-ONNX（以及它用的 andrewleech/qwen3-asr-onnx 匯出程式）寫成 9125、882，
+// 那是 Llama 3 詞表的 id，在 Qwen 詞表裡是「 Current」「 time」，模型看到的 prompt 跟訓練時不一樣。
+// 用 tokenizer 把角色名稱重新編碼後換回去；已經正確（或找不到 <|im_start|>）就不動。回傳新的 prefix。
+export function fixRoleTokens(prefixIds, imStartId, encode, roles = ['system', 'user']) {
+  const out = [...prefixIds];
+  let r = 0;
+  for (let i = 0; i < out.length - 1 && r < roles.length; i++) {
+    if (out[i] !== imStartId) continue;
+    const want = encode(roles[r++]);
+    if (want.length === 1) out[i + 1] = want[0];
+  }
+  return out;
+}
+
 // ===== byte-level BPE 編碼（只用來把「背景資訊」轉成 token 當提示）=====
 // Qwen 的 BPE 是從 tiktoken 來的：合併的優先順序就是合併後 token 的 id（越小越先合併），
 // 所以只要 vocab.json，不需要 11MB 的 tokenizer.json。切詞規則（pre-tokenize）跟 Qwen2 tokenizer 一樣，並先做 NFC。

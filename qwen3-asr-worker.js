@@ -3,7 +3,7 @@
 // 模型格式見 jiangzhuo9357/Qwen3-ASR-1.7B-ONNX 的模型卡（layout v2，所有常數都在 prompt_config.json）。
 // 跟 asr-worker.js 用同一套訊息：load → loaded、transcribe → result / error、progress、status。
 import * as ort from './lib/ort.webgpu.min.mjs';
-import { makeBpeDecoder, makeBpeEncoder, makeEmbedder, transcribe } from './qwen3-asr-core.js';
+import { makeBpeDecoder, makeBpeEncoder, makeEmbedder, transcribe, fixRoleTokens } from './qwen3-asr-core.js';
 import { ORT_WASM_PATHS, gpuInfo, echoesContext } from './shared.js';
 
 ort.env.wasm.wasmPaths = { ...ORT_WASM_PATHS }; // 不從 CDN 載入，見 shared.js
@@ -112,12 +112,23 @@ async function load(model) {
   const step = await ort.InferenceSession.create(await fetchFile(model, v.decoder_step),
     { ...opt, ...ext, preferredOutputLocation: kvOnGpu });
 
+  // prefix 裡的角色名稱改回「system」「user」（見 fixRoleTokens 的說明）
+  const encode = makeBpeEncoder(vocab);
+  const imStart = added['<|im_start|>'];
+  if (imStart != null) {
+    const fixed = fixRoleTokens(cfg.prompt.prefix_ids, imStart, encode);
+    if (fixed.join() !== cfg.prompt.prefix_ids.join()) {
+      console.log('[qwen3-asr] 修正 prompt 的角色 token', cfg.prompt.prefix_ids, '→', fixed);
+      cfg.prompt.prefix_ids = fixed;
+    }
+  }
+
   state = {
     model, cfg, filters, f16: variantKey === 'q4f16',
     sessions: { encoder, init, step },
     embedder: makeEmbedder(cfg, table, scales),
     decode: makeBpeDecoder(vocab, added),
-    encode: makeBpeEncoder(vocab),
+    encode,
   };
 
   // 用 1 秒靜音實際跑一次：確認 WebGPU 能執行，也順便預熱
