@@ -45,6 +45,39 @@ export function dropEchoedContext(text, previous) {
   return out || text;
 }
 
+// ===== 自動增益（只用在送去辨識的那一路，喇叭聽到的音量不變）=====
+// 很小聲的影片：講話的音量可能比靜音門檻的下限還低，整段被當成靜音。
+// 所以在判斷有沒有人講話之前，先依最近 10 秒的音量把聲音整體拉大。
+// - 用最近 10 秒音框音量的 95 百分位（大致是講話時的音量）估計需要放大幾倍，最多 maxGain 倍、只放大不縮小
+// - 要放大的倍數變小時立刻降（突然變大聲不會爆音），變大時慢慢升（約 2 秒）
+// - 每個音框再以峰值限制，放大後不超過 0.99
+export function makeAgc({ target = 0.1, maxGain = 16, windowFrames = 100, rise = 0.05 } = {}) {
+  const recent = [];
+  let gain = 1;
+  return {
+    get gain() { return gain; },
+    // frame：原始音框（會被就地放大）；回傳這個音框實際用的倍數
+    process(frame) {
+      let sum = 0, peak = 0;
+      for (let i = 0; i < frame.length; i++) {
+        const v = frame[i];
+        sum += v * v;
+        const a = v < 0 ? -v : v;
+        if (a > peak) peak = a;
+      }
+      recent.push(Math.sqrt(sum / frame.length));
+      if (recent.length > windowFrames) recent.shift();
+      const sorted = [...recent].sort((a, b) => a - b);
+      const p95 = sorted[Math.floor(0.95 * (sorted.length - 1))];
+      const want = p95 > 0 ? Math.min(maxGain, Math.max(1, target / p95)) : gain;
+      gain = want < gain ? want : gain + (want - gain) * rise;
+      const g = peak > 0 ? Math.min(gain, 0.99 / peak) : gain;
+      if (g > 1) for (let i = 0; i < frame.length; i++) frame[i] *= g;
+      return g;
+    },
+  };
+}
+
 // ===== 影片時間 =====
 // read：從影片分頁讀到的 { t: currentTime, at: 讀取當下的 Date.now(), paused, rate }
 // flushWall：切段當下的 Date.now()；backS：這段的開頭在切段當下之前幾秒（擷取時間）
