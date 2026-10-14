@@ -79,6 +79,25 @@ export function echoesContext(text, recent) {
   });
 }
 
+// 講話中途硬切時，下一段開頭會重複帶上一段結尾的 0.3 秒，辨識結果開頭可能重複上一段最後幾個字。
+// 新結果的開頭（2～maxChars 個字，忽略標點）跟上一段的結尾相同，就刪掉；找不到就原樣保留。
+const EDGE_PUNCT = /[\s、。，,.！!？?…「」『』（）()~～ー-]+/g;
+export function dropOverlap(prev, text, maxChars = 8) {
+  const tail = prev.replace(EDGE_PUNCT, '').slice(-maxChars);
+  if (!tail) return text;
+  // 新結果的前幾個「非標點字」各在原字串的哪個位置
+  const pos = [];
+  for (let i = 0; i < text.length && pos.length < maxChars; i++) if (!/[\s、。，,.！!？?…「」『』（）()~～ー-]/.test(text[i])) pos.push(i);
+  const plain = pos.map((i) => text[i]).join('');
+  for (let k = Math.min(maxChars, plain.length, tail.length); k >= 2; k--) {
+    if (tail.endsWith(plain.slice(0, k))) {
+      const rest = text.slice(pos[k - 1] + 1).replace(/^[\s、。，,.！!？?…]+/, '');
+      return rest || text;
+    }
+  }
+  return text;
+}
+
 // ===== 自動增益（只用在送去辨識的那一路，喇叭聽到的音量不變）=====
 // 很小聲的影片：講話的音量可能比靜音門檻的下限還低，整段被當成靜音。
 // 所以在判斷有沒有人講話之前，先依最近 10 秒的音量把聲音整體拉大。

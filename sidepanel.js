@@ -1,5 +1,5 @@
 import {
-  makeAgc, periodicity, isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext, dropPromptEcho, dropHangul, suspiciousContextOutput, videoStartFrom, classifyGap,
+  makeAgc, periodicity, isQwen3Asr, isCohere, gpuInfo, collapseRepeats, dropEchoedContext, dropOverlap, dropPromptEcho, dropHangul, suspiciousContextOutput, videoStartFrom, classifyGap,
 } from './shared.js';
 
 // ===== 設定 =====
@@ -27,6 +27,7 @@ const MIN_SEG_S = 3;            // 一段至少 3 秒才切（太短會把一句
 const MAX_SEG_S = 8;            // 累積到 8 秒還沒遇到停頓，就在最安靜的地方切（快語速也不會一段塞太多字）
 const CUT_SEARCH_FROM_S = 4;    // 到上限時，只在這個時間點之後找最安靜的音框來切
 const PRE_ROLL_FRAMES = 3;      // 段落開頭往前多帶 0.3 秒，避免吃掉輕聲的字頭
+const CUT_OVERLAP_FRAMES = 3;   // 講話中途硬切（MAX_SEG_S）時，下一段開頭重複帶切點前 0.3 秒，避免切點上的字被切成兩半；重複辨識到的字由 dropOverlap 刪掉
 const TARGET_RMS = 0.1;         // 送辨識前，把說話部分的音量拉到這個程度（只放大，不縮小）
 const MAX_GAIN = 8;             // 最多放大幾倍，避免把底噪放大成人聲
 const INPUT_MAX_GAIN = 16;      // 判斷有沒有人講話之前的自動增益上限（很小聲的影片才會用到，見 shared.js 的 makeAgc）
@@ -215,6 +216,7 @@ function transcribe(audio, lang, context) {
 // 使用者填的關鍵字＋影片標題＋前 ASR_CONTEXT_SENTENCES 段辨識結果。前後文讓同音詞、專有名詞比較容易辨識對。
 const ASR_CONTEXT_SENTENCES = 2;
 const asrRecent = [];             // 最近幾段辨識結果（原文）
+let prevSegText = '';             // 上一段的辨識結果（被略過就是空字串），用來刪掉重疊部分重複辨識的字
 let videoTitle = '';
 function asrContext() {
   const fixed = [els.asrContext.value.trim(), videoTitle].filter(Boolean).join('\n');
@@ -491,7 +493,7 @@ function noteGap(times, gapPeak) {
     flushGroup();
     mtContext.length = 0;
     mtRecentZh.length = 0;
-    asrRecent.length = 0;
+    asrRecent.length = 0; prevSegText = '';
     addSkipNote(null, `↪ 影片跳到 ${fmtTime(times.start)}`, 'seek');
   } else if (g.kind === 'gap') {
     const hint = gapPeak >= GAP_QUIET_RATIO
@@ -593,6 +595,7 @@ function enqueueDrop(t0, voicedS, info) {
   queue = queue.then(async () => {
     const times = await timesP;
     noteGap(times, info.gapPeak);
+    prevSegText = '';
     addSkipNote(times.start, `略過：有聲音的部分只有 ${voicedS.toFixed(1)}s，太短`);
   });
 }
@@ -611,8 +614,14 @@ function enqueueSegment(audio, cap0, srcSetting, info) {
       const tStart = performance.now();
       const res = await transcribe(audio, srcSetting === 'auto' ? null : srcSetting, asrContext());
       const { lang } = res;
-      const text = collapseRepeats(res.text);
+      let text = collapseRepeats(res.text);
       if (text !== res.text) console.log('[asr] 收斂重複片段', res.text.length, '→', text.length, '字');
+      if (info.overlapS && prevSegText) {
+        const cut = dropOverlap(prevSegText, text);
+        if (cut !== text) console.log('[asr] 刪掉跟上一段重疊的開頭', { prev: prevSegText.slice(-10), text, cut });
+        text = cut;
+      }
+      prevSegText = '';
       const asrMs = Math.round(performance.now() - tStart);
       if (!text) {
         addSkipNote(t0, `略過：辨識結果為空（音訊 ${audioS.toFixed(1)}s，可能太小聲或只有雜音）`);
@@ -622,6 +631,7 @@ function enqueueSegment(audio, cap0, srcSetting, info) {
         addSkipNote(t0, `略過：被當成幻覺濾掉「${text}」`);
         return;
       }
+      prevSegText = text;
       asrRecent.push(text);
       if (asrRecent.length > ASR_CONTEXT_SENTENCES) asrRecent.shift();
       const entry = addEntry(t0, text, { audioS, waitMs: Math.round(tStart - tEnq), asrMs });
@@ -631,6 +641,7 @@ function enqueueSegment(audio, cap0, srcSetting, info) {
       if (srcSetting === 'zh') { entry.setZh(text); return; }
       queueForTranslation(entry, srcSetting);
     } catch (err) {
+      prevSegText = '';
       setStatus(`辨識錯誤：${err.message}`, true);
       addSkipNote(t0, `略過：辨識錯誤 ${err.message}`);
     } finally {
@@ -691,7 +702,7 @@ async function start() {
 
     let mtNote = '';
     mtContext.length = 0; // 不要把上一部影片的句子當成這次的上下文
-    asrRecent.length = 0;
+    asrRecent.length = 0; prevSegText = '';
     mtRecentZh.length = 0;
     if (engine !== 'hymt' || srcSetting === 'zh') unloadMt();
     if (engine === 'hymt' && srcSetting !== 'zh') {
@@ -773,6 +784,7 @@ function makeSegmenter(inRate, onSegment, onDrop) {
   let quiet = 0;                  // 距離最後一個有聲音框已經過了幾個音框（不論有沒有在錄段落）
   let gapPeak = 0;                // 段落之間的空白裡，最大音量 ÷ 門檻（看有沒有小聲說話被當成靜音）
   let segGapPeak = 0;             // 目前這段開始前那段空白的 gapPeak
+  let segOverlapS = 0;            // 目前這段開頭跟上一段重疊的秒數（講話中途硬切時才有）
 
   let threshold = SILENCE_RMS;    // 目前的有聲音門檻（隨底噪調整）
   let softThreshold = SILENCE_RMS; // 低於門檻、但有音高時的門檻
@@ -803,7 +815,8 @@ function makeSegmenter(inRate, onSegment, onDrop) {
 
   function flush() {
     // end：這段結束的擷取時間；now：目前擷取到的時間；gapPeak：這段之前的空白裡，最大音量是門檻的幾倍
-    const info = { end: segStart + frames.length / 10, now: totalOut / SR, gapPeak: segGapPeak };
+    // overlapS：這段開頭跟上一段重疊幾秒（辨識結果開頭可能重複上一段的結尾）
+    const info = { end: segStart + frames.length / 10, now: totalOut / SR, gapPeak: segGapPeak, overlapS: segOverlapS };
     // 有聲音的部分很短時，看音高決定要不要送：0.2 秒要有一個音框有人聲音高，0.1 秒（只有一個音框）要音高非常明顯
     const short = frames.length && voiced * 0.1 < MIN_VOICED_S;
     const bestPitch = short ? Math.max(0, ...frames.map((f, i) => (isLoud(rmsArr[i]) ? periodicity(f, SR) : 0))) : 0;
@@ -824,7 +837,10 @@ function makeSegmenter(inRate, onSegment, onDrop) {
       gapPeak = Math.max(segGapPeak, peak);
       console.log(`[vad] 丟掉很短的聲音：有聲音 ${(voiced * 0.1).toFixed(1)}s、音量是門檻的 ${Math.round(peak * 100)}%、音高 ${bestPitch.toFixed(2)}`);
     }
-    frames = []; rmsArr = []; voiced = 0; trailingSilent = 0; pre = [];
+    // 這段結尾的安靜音框留給下一段當開頭留白：停頓後馬上又開口時，輕聲的字頭常落在這幾個音框裡
+    pre = [];
+    for (let i = frames.length - 1; i >= 0 && pre.length < PRE_ROLL_FRAMES && !isLoud(rmsArr[i]); i--) pre.unshift({ f: frames[i], r: rmsArr[i] });
+    frames = []; rmsArr = []; voiced = 0; trailingSilent = 0; segOverlapS = 0;
   }
 
   // 累積到上限仍沒遇到停頓（快語速）：回頭找最安靜的音框切，後面的音訊留給下一段，不丟失
@@ -834,7 +850,9 @@ function makeSegmenter(inRate, onSegment, onDrop) {
     for (let i = from; i < frames.length; i++) if (rmsArr[i] <= rmsArr[idx]) idx = i;
 
     const tailF = frames.slice(idx + 1), tailR = rmsArr.slice(idx + 1);
-    const nextStart = segStart + (idx + 1) / 10;
+    const ov = Math.min(CUT_OVERLAP_FRAMES, idx + 1);  // 切點前幾個音框，下一段開頭再帶一次
+    const ovF = frames.slice(idx + 1 - ov, idx + 1), ovR = rmsArr.slice(idx + 1 - ov, idx + 1);
+    const nextStart = segStart + (idx + 1 - ov) / 10;
     frames = frames.slice(0, idx + 1); rmsArr = rmsArr.slice(0, idx + 1);
     voiced = rmsArr.filter(isLoud).length;
     flush();
@@ -844,7 +862,8 @@ function makeSegmenter(inRate, onSegment, onDrop) {
       pre = tailF.slice(-PRE_ROLL_FRAMES).map((f, i, a) => ({ f, r: tailR[tailR.length - a.length + i] }));
       return;
     }
-    frames = tailF; rmsArr = tailR; voiced = tailVoiced; segStart = nextStart;
+    frames = [...ovF, ...tailF]; rmsArr = [...ovR, ...tailR]; voiced = tailVoiced; segStart = nextStart;
+    segOverlapS = ov / 10;
     segGapPeak = 0; // 緊接著上一段，中間沒有空白
     trailingSilent = 0;
     for (let i = tailR.length - 1; i >= 0 && !isLoud(tailR[i]); i--) trailingSilent++;
@@ -916,7 +935,7 @@ function makeSegmenter(inRate, onSegment, onDrop) {
 // ===== 按鈕 =====
 els.start.onclick = start;
 els.stop.onclick = stop;
-els.clear.onclick = () => { prevSeg = null; transcript.length = 0; mtContext.length = 0; mtRecentZh.length = 0; asrRecent.length = 0; resetGroup(); showEmpty(); };
+els.clear.onclick = () => { prevSeg = null; transcript.length = 0; mtContext.length = 0; mtRecentZh.length = 0; asrRecent.length = 0; prevSegText = ''; resetGroup(); showEmpty(); };
 els.exp.onclick = () => {
   if (!transcript.length) return;
   const text = transcript.map((e) => `[${fmtTime(e.t0)}]\n${e.text}\n${e.zh ? e.zh + '\n' : ''}`).join('\n');
