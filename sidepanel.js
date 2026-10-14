@@ -35,6 +35,7 @@ const LONG_SEG_S = 6;           // 累積超過 6 秒後，改用較短的停頓
 const LONG_END_SILENCE_S = 0.35;
 const MIN_VOICED_S = 0.3;       // 有聲音的部分不到 0.3 秒就丟掉（避免 Whisper 對靜音亂講；太高會吃掉「はい」這類短回應）
 const MIN_PITCHED_VOICED_S = 0.2; // 有聲音的部分 0.2～0.3 秒、但有人聲的音高（「え？」、被笑聲隔開的句尾）也送去辨識；碰撞聲、雜音沒有音高，照樣丟掉
+const STRONG_PERIODICITY = 0.8;    // 只有一個音框（0.1 秒）超過門檻時，音高要這麼明顯才送（短促的「え」）
 const MIN_NOTE_VOICED_S = 0.15; // 被丟掉的段落若有聲音部分超過這個長度，就在畫面上留一行提示
 const GAP_QUIET_RATIO = 0.5;    // 空白期間最大音量超過門檻的這個比例，就提示「可能有小聲說話被當成靜音」
 
@@ -779,9 +780,13 @@ function makeSegmenter(inRate, onSegment, onDrop) {
   function flush() {
     // end：這段結束的擷取時間；now：目前擷取到的時間；gapPeak：這段之前的空白裡，最大音量是門檻的幾倍
     const info = { end: segStart + frames.length / 10, now: totalOut / SR, gapPeak: segGapPeak };
-    // 有聲音的部分很短時，至少要有一個音框有人聲的音高才送
-    const pitched = () => frames.some((f, i) => isLoud(rmsArr[i]) && periodicity(f, SR) >= VOICED_PERIODICITY);
-    if (frames.length && (voiced * 0.1 >= MIN_VOICED_S || (voiced * 0.1 >= MIN_PITCHED_VOICED_S && pitched()))) {
+    // 有聲音的部分很短時，看音高決定要不要送：0.2 秒要有一個音框有人聲音高，0.1 秒（只有一個音框）要音高非常明顯
+    const short = frames.length && voiced * 0.1 < MIN_VOICED_S;
+    const bestPitch = short ? Math.max(0, ...frames.map((f, i) => (isLoud(rmsArr[i]) ? periodicity(f, SR) : 0))) : 0;
+    const keep = frames.length && (!short ||
+      (voiced * 0.1 >= MIN_PITCHED_VOICED_S && bestPitch >= VOICED_PERIODICITY) ||
+      (voiced >= 1 && bestPitch >= STRONG_PERIODICITY));
+    if (keep) {
       const g = gainFor();
       const audio = new Float32Array(frames.length * FRAME);
       frames.forEach((f, i) => audio.set(f, i * FRAME));
@@ -789,6 +794,11 @@ function makeSegmenter(inRate, onSegment, onDrop) {
       onSegment(audio, segStart, info);
     } else if (frames.length && voiced * 0.1 >= MIN_NOTE_VOICED_S) {
       onDrop?.(segStart, voiced * 0.1, info);
+    } else if (frames.length) {
+      // 太短、連提示都不留的聲音：不要讓它把空白切斷，否則空白提示會只看後半段、誤寫成「期間都很安靜」
+      const peak = Math.max(...rmsArr) / threshold;
+      gapPeak = Math.max(segGapPeak, peak);
+      console.log(`[vad] 丟掉很短的聲音：有聲音 ${(voiced * 0.1).toFixed(1)}s、音量是門檻的 ${Math.round(peak * 100)}%、音高 ${bestPitch.toFixed(2)}`);
     }
     frames = []; rmsArr = []; voiced = 0; trailingSilent = 0; pre = [];
   }
