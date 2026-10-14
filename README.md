@@ -62,7 +62,7 @@
 
 ### 翻譯引擎
 - **Chrome 內建**（預設）：Chrome 的 Translator API，快，但一次只翻一句，看不到前文。
-- **HY-MT1.5 本機模型**：騰訊的翻譯專用模型 [`onnx-community/HY-MT1.5-1.8B-ONNX`](https://huggingface.co/onnx-community/HY-MT1.5-1.8B-ONNX)，官方支援繁體中文。翻譯時會把前 2 句原文當上下文一起送進去（`MT_CONTEXT_SENTENCES`），日文省略主詞時比較不容易翻錯。
+- **HY-MT1.5 本機模型**：騰訊的翻譯專用模型 [`onnx-community/HY-MT1.5-1.8B-ONNX`](https://huggingface.co/onnx-community/HY-MT1.5-1.8B-ONNX)，官方支援繁體中文。翻譯時會把前 2 句原文當上下文一起送進去（`MT_CONTEXT_SENTENCES`），日文省略主詞時比較不容易翻錯。1.8B 的小模型偶爾會把提示詞或前文也翻出來；遇到譯文含提示詞、或句子比原文多 2 句以上時，那一句會不帶前文重翻一次（console 會印 `[mt] 帶上下文的譯文可疑`）。
   - 需要 WebGPU，下載 1.2～1.4GB；跟辨識模型同時在 GPU 上，顯示記憶體要夠（搭配 Qwen3-ASR 1.7B 大約要 5GB 以上）。
   - 載入失敗時自動改用 Chrome 內建翻譯，狀態列會註明。
   - 提示詞用模型卡建議的中文模板；在 `mt-worker.js` 的 `buildPrompt`。

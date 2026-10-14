@@ -45,6 +45,20 @@ export function dropEchoedContext(text, previous) {
   return out || text;
 }
 
+// HY-MT1.5 偶爾會把提示詞本身也輸出，例如「參考上述的信息，將下面的文本翻譯成中文吧。」
+// 同時提到「翻譯」和提示詞裡的字眼（文本、上文、上述、信息…）的句子就刪掉；全部都被刪掉時回傳空字串。
+const PROMPT_ECHO = /(翻譯|翻译).*(文本|上文|上述|上面|信息|資訊|资讯|繁體|繁体|解釋|解释)|(文本|上文|上述|上面|信息|資訊|资讯|繁體|繁体|解釋|解释).*(翻譯|翻译)/;
+export function dropPromptEcho(text) {
+  return splitSentences(text).filter((s) => !PROMPT_ECHO.test(s)).join('').trim();
+}
+
+// 帶上下文翻譯的結果看起來可疑，要不帶上下文重翻一次：
+// 有提示詞，或是譯文的句數比原文多 2 句以上（多出來的通常是把上下文換句話說又翻了一次）
+const countSentences = (s) => splitSentences(s).filter((x) => x.replace(PUNCT, '').length).length;
+export function suspiciousContextOutput(source, zh) {
+  return dropPromptEcho(zh) !== zh.trim() || countSentences(zh) > countSentences(source) + 1;
+}
+
 // ===== 自動增益（只用在送去辨識的那一路，喇叭聽到的音量不變）=====
 // 很小聲的影片：講話的音量可能比靜音門檻的下限還低，整段被當成靜音。
 // 所以在判斷有沒有人講話之前，先依最近 10 秒的音量把聲音整體拉大。
