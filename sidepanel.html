@@ -49,6 +49,12 @@
                placeholder="例如：ホロライブ、宝鐘マリン、スパチャ">
       </label>
     </div>
+    <div class="row" id="q4Row" hidden>
+      <label>
+        <input id="forceQ4" type="checkbox">
+        強制使用 q4（Qwen3-ASR 預設在顯示卡支援 fp16 時用 q4f16；辨識出亂碼或一直是空的時候勾這個試試，勾選後下次開始時重新載入模型）
+      </label>
+    </div>
     <div class="row" id="customRow" hidden>
       <label>自訂模型 ID（Transformers.js 能載入的 ONNX 版 Whisper，或 Qwen3-ASR layout v2 的 ONNX）
         <input id="customModel" type="text" spellcheck="false" autocomplete="off"

@@ -54,7 +54,7 @@ const HALLUCINATIONS = [
 const $ = (id) => document.getElementById(id);
 const els = {
   srcLang: $('srcLang'), model: $('model'), customModel: $('customModel'), customRow: $('customRow'),
-  asrContext: $('asrContext'), contextRow: $('contextRow'),
+  asrContext: $('asrContext'), contextRow: $('contextRow'), forceQ4: $('forceQ4'), q4Row: $('q4Row'),
   mode: $('mode'), engine: $('engine'), start: $('startBtn'), stop: $('stopBtn'),
   exp: $('exportBtn'), clear: $('clearBtn'), status: $('status'), progress: $('progress'),
   dl: $('dlTranslatorBtn'), list: $('list'),
@@ -69,11 +69,12 @@ function setStatus(text, isErr = false) {
 function showCustomRow() {
   els.customRow.hidden = els.model.value !== 'custom';
   // 背景資訊只有 Qwen3-ASR 會用
-  els.contextRow.hidden = !isQwen3Asr(els.model.value === 'custom' ? els.customModel.value : els.model.value);
+  els.contextRow.hidden = els.q4Row.hidden = !isQwen3Asr(els.model.value === 'custom' ? els.customModel.value : els.model.value);
 }
 
 let modelPicked = false;          // 使用者在這次開側欄後自己選過模型：不要再套用預設值
-chrome.storage.local.get(['srcLang', 'model', 'customModel', 'mode', 'engine', 'asrContext']).then(async (s) => {
+chrome.storage.local.get(['srcLang', 'model', 'customModel', 'mode', 'engine', 'asrContext', 'forceQ4']).then(async (s) => {
+  els.forceQ4.checked = !!s.forceQ4;
   if (s.asrContext) els.asrContext.value = s.asrContext;
   if (s.srcLang) els.srcLang.value = s.srcLang;
   if (s.customModel) els.customModel.value = s.customModel;
@@ -95,6 +96,7 @@ els.model.onchange = () => {
   showCustomRow();
 };
 els.customModel.onchange = () => { chrome.storage.local.set({ customModel: els.customModel.value.trim() }); showCustomRow(); };
+els.forceQ4.onchange = () => chrome.storage.local.set({ forceQ4: els.forceQ4.checked });
 els.asrContext.onchange = () => chrome.storage.local.set({ asrContext: els.asrContext.value.trim() });
 
 // 回傳要載入的模型 ID；自訂模型格式不對時丟出錯誤
@@ -120,6 +122,7 @@ const fileProgress = new Map();
 // WebGPU 跑不動的模型 -> 失敗原因。這些模型直接在新的 worker 裡用 CPU 載入，不再試 WebGPU。
 const gpuBroken = new Map();
 
+let workerForceQ4 = false;      // 目前這個 worker 是不是用「強制 q4」載入的
 let workerModel = null;         // 目前這個 worker 載入（或正在載入）的模型
 let workerDirty = false;        // 這個 worker 出過錯（WebGPU 失敗後可能整個壞掉），下次載入要換新的
 
@@ -186,8 +189,10 @@ function loadModel(model) {
   // 換模型、上次載入失敗、或辨識時出過 WebGPU 錯誤：都換一個全新的 worker，
   // 不要在可能已經壞掉的 ONNX Runtime 上繼續載入（那樣會一直失敗、一直重新下載）。
   // 模型檔有瀏覽器快取，換 worker 不會重新下載。
-  if (!worker || workerDirty || workerModel !== model) spawnWorker(model);
+  const forceQ4 = isQwen3Asr(model) && els.forceQ4.checked;
+  if (!worker || workerDirty || workerModel !== model || workerForceQ4 !== forceQ4) spawnWorker(model);
   workerModel = model;
+  workerForceQ4 = forceQ4;
   fileProgress.clear();
   let resolve, reject;
   const promise = new Promise((a, b) => { resolve = a; reject = b; });
@@ -197,7 +202,7 @@ function loadModel(model) {
     reject: (e) => { workerReady.done = true; reject(e); },
   };
   const reason = gpuBroken.get(model);
-  worker.postMessage({ type: 'load', model, forceWasm: !!reason, reason });
+  worker.postMessage({ type: 'load', model, forceWasm: !!reason, reason, forceQ4 });
   promise.catch(() => { workerDirty = true; });
   return promise;
 }
