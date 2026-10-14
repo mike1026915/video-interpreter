@@ -223,8 +223,9 @@ const ASR_CONTEXT_SENTENCES = 2;
 const asrRecent = [];             // 最近幾段辨識結果（原文）
 let prevSegText = '';             // 上一段的辨識結果（被略過就是空字串），用來刪掉重疊部分重複辨識的字
 let videoTitle = '';
-function asrContext() {
-  const fixed = [els.asrContext.value.trim(), videoTitle].filter(Boolean).join('\n');
+let lastAsrLang = null;           // 自動偵測時，上一段辨識出的語言（ISO 代碼）
+async function asrContext(src) {
+  const fixed = [await localizeContext(els.asrContext.value.trim(), src), videoTitle].filter(Boolean).join('\n');
   return { fixed, recent: [...asrRecent] };
 }
 // 影片分頁標題去掉網站名稱（「… - YouTube」）
@@ -617,8 +618,9 @@ function enqueueSegment(audio, cap0, srcSetting, info) {
     noteGap(times, info.gapPeak);
     try {
       const tStart = performance.now();
-      const res = await transcribe(audio, srcSetting === 'auto' ? null : srcSetting, asrContext());
+      const res = await transcribe(audio, srcSetting === 'auto' ? null : srcSetting, await asrContext(srcSetting === 'auto' ? lastAsrLang : srcSetting));
       const { lang } = res;
+      if (lang) lastAsrLang = lang;
       let text = collapseRepeats(res.text);
       if (text !== res.text) console.log('[asr] 收斂重複片段', res.text.length, '→', text.length, '字');
       if (info.overlapS && prevSegText) {
@@ -657,11 +659,55 @@ function enqueueSegment(audio, cap0, srcSetting, info) {
 }
 
 // ===== 擷取分頁聲音並切段 =====
+// 使用者用中文填背景資訊時，翻成影片的語言再給辨識模型：模型要輸出的是原文（例如日文）的字，
+// 給中文它對不上字形，還容易把中文敘述改寫成日文輸出。
+const reverseTranslators = new Map();   // 目標語言 -> Promise<Translator>（繁中 → 目標語言）
+async function getReverseTranslator(dst, withActivation) {
+  if (reverseTranslators.has(dst)) return reverseTranslators.get(dst);
+  if (!('Translator' in self)) return null;
+  const avail = await Translator.availability({ sourceLanguage: TARGET, targetLanguage: dst });
+  if (avail === 'unavailable' || (avail !== 'available' && !withActivation)) return null;
+  const p = Translator.create({
+    sourceLanguage: TARGET, targetLanguage: dst,
+    monitor(m) {
+      m.addEventListener('downloadprogress', (e) =>
+        setStatus(`下載翻譯模型（繁中→${langName(dst)}，用來翻背景資訊）… ${Math.round(e.loaded * 100)}%`));
+    },
+  });
+  reverseTranslators.set(dst, p);
+  p.catch(() => reverseTranslators.delete(dst));
+  return p;
+}
+
+const contextTranslations = new Map();  // `${src}\n${text}` -> Promise<翻譯後的文字>
+// 回傳翻成 src 的背景資訊；不需要翻（不是中文、不知道語言、src 是中文）或翻不了（模型還沒下載、不支援）就回傳原文
+async function localizeContext(text, src) {
+  if (!text || !src || src === 'zh') return text;
+  const key = `${src}\n${text}`;
+  if (!contextTranslations.has(key)) {
+    contextTranslations.set(key, (async () => {
+      try {
+        if ((await detectLang(text)) !== 'zh') return text;
+        const tr = await getReverseTranslator(src, false);
+        if (!tr) { contextTranslations.delete(key); return text; }   // 下載模型要使用者點擊，下次再試
+        const out = (await tr.translate(text)).trim();
+        console.log('[asr] 背景資訊翻成', src, { text, out });
+        return out || text;
+      } catch (err) {
+        console.warn('[asr] 背景資訊翻譯失敗，用原文', err);
+        return text;
+      }
+    })());
+  }
+  return contextTranslations.get(key);
+}
+
 let running = false;
 let stream = null, ctx = null, workletNode = null;
 
 async function start() {
   const srcSetting = els.srcLang.value;
+  lastAsrLang = null;
   let model;
   try { model = getModel(); } catch (err) { setStatus(err.message, true); return; }
   if (isCohere(model) && srcSetting === 'auto') {
@@ -679,6 +725,10 @@ async function start() {
       if ('LanguageDetector' in self) detector = LanguageDetector.create();
     } else if (srcSetting !== 'zh') {
       getTranslator(srcSetting, true).catch((err) => setStatus(err.message, true));
+      const ctxText = els.asrContext.value.trim();
+      if (isQwen3Asr(model) && ctxText) {
+        detectLang(ctxText).then((l) => l === 'zh' && getReverseTranslator(srcSetting, true)).catch(() => {});
+      }
     }
   } catch (err) { setStatus(err.message, true); }
 
