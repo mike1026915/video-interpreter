@@ -56,7 +56,15 @@ export function dropPromptEcho(text) {
 // 有提示詞，或是譯文的句數比原文多 2 句以上（多出來的通常是把上下文換句話說又翻了一次）
 const countSentences = (s) => splitSentences(s).filter((x) => x.replace(PUNCT, '').length).length;
 export function suspiciousContextOutput(source, zh) {
-  return dropPromptEcho(zh) !== zh.trim() || countSentences(zh) > countSentences(source) + 1;
+  return dropPromptEcho(zh) !== zh.trim() || countSentences(zh) > countSentences(source) + 1 ||
+    dropHangul(zh, source) !== zh.trim();
+}
+
+// HY-MT1.5 偶爾會翻成韓文（「そうか。」→「그렇군요。」）：原文沒有韓文時，含韓文的句子刪掉
+const HANGUL = /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/;
+export function dropHangul(text, source) {
+  if (HANGUL.test(source)) return text.trim();
+  return splitSentences(text).filter((s) => !HANGUL.test(s)).join('').trim();
 }
 
 // ===== 自動增益（只用在送去辨識的那一路，喇叭聽到的音量不變）=====
