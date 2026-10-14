@@ -5,6 +5,9 @@ import { ORT_WASM_PATHS, isCohere, gpuInfo } from './shared.js';
 env.allowLocalModels = false;
 env.useBrowserCache = true; // 模型下載一次後會快取
 env.backends.onnx.wasm.wasmPaths = { ...ORT_WASM_PATHS }; // 不從 CDN 載入，見 shared.js
+// 不要用 transformers.js 的 wasm 快取：它會把 ORT 的 .mjs 轉成 blob: 網址再 import，
+// 擴充功能的 CSP（script-src 'self'）會擋掉，結果是「no available backend found」
+env.useWasmCache = false;
 env.backends.onnx.wasm.numThreads = 1;
 
 const WHISPER_LANG = {
@@ -177,7 +180,7 @@ async function decodeWhisper(audio, language) {
     }
   }
   try {
-    return await asr(audio, opts);
+    return await asr(audio, { ...opts, no_repeat_ngram_size: NO_REPEAT_NGRAM });
   } catch (err) {
     if (langOk && /language|task/i.test(errMsg(err))) {
       console.warn('[asr] 這個模型不接受 language / task 參數，之後不再傳', err);

@@ -1,4 +1,4 @@
-import { isQwen3Asr, isCohere, gpuInfo } from './shared.js';
+import { isQwen3Asr, isCohere, gpuInfo, collapseRepeats } from './shared.js';
 
 // ===== 設定 =====
 const TARGET = 'zh-Hant';
@@ -488,7 +488,10 @@ function enqueueSegment(audio, t0, srcSetting) {
   queue = queue.then(async () => {
     try {
       const tStart = performance.now();
-      const { text, lang } = await transcribe(audio, srcSetting === 'auto' ? null : srcSetting);
+      const res = await transcribe(audio, srcSetting === 'auto' ? null : srcSetting);
+      const { lang } = res;
+      const text = collapseRepeats(res.text);
+      if (text !== res.text) console.log('[asr] 收斂重複片段', res.text.length, '→', text.length, '字');
       const asrMs = Math.round(performance.now() - tStart);
       if (!text) {
         addSkipNote(t0, `略過：辨識結果為空（音訊 ${audioS.toFixed(1)}s，可能太小聲或只有雜音）`);

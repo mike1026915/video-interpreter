@@ -7,6 +7,9 @@ import { ORT_WASM_PATHS, gpuInfo } from './shared.js';
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 env.backends.onnx.wasm.wasmPaths = { ...ORT_WASM_PATHS }; // 不從 CDN 載入，見 shared.js
+// 不要用 transformers.js 的 wasm 快取：它會把 ORT 的 .mjs 轉成 blob: 網址再 import，
+// 擴充功能的 CSP（script-src 'self'）會擋掉，結果是「no available backend found」
+env.useWasmCache = false;
 
 const MODEL = 'onnx-community/HY-MT1.5-1.8B-ONNX';
 const TARGET_NAME = '繁体中文';   // HY-MT 的語言表用簡體中文寫語言名稱
