@@ -48,13 +48,13 @@
         <input id="asrContext" type="text" spellcheck="false" autocomplete="off"
                placeholder="例如：ホロライブ、宝鐘マリン、スパチャ">
       </label>
-      <label>
+      <label class="check">
         <input id="translateCtx" type="checkbox">
         背景資訊是中文時，先用 Chrome 內建翻譯翻成影片語言（機器翻譯的用字常跟實際講的不同，例如「前輩」會翻成「シニア」，所以預設不翻；建議直接填原文語言的關鍵字）
       </label>
     </div>
     <div class="row" id="q4Row" hidden>
-      <label>
+      <label class="check">
         <input id="forceQ4" type="checkbox">
         強制使用 q4（Qwen3-ASR 預設在顯示卡支援 fp16 時用 q4f16；辨識出亂碼或一直是空的時候勾這個試試，勾選後下次開始時重新載入模型）
       </label>
